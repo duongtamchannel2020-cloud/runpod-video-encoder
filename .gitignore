@@ -1,0 +1,31 @@
+# RunPod Video Encoder - Security
+
+# Sensitive files
+credentials.json
+token.json
+
+# Node modules
+node_modules/
+npm-debug.log*
+
+# Logs
+logs/
+*.log
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Temp files
+temp/
+tmp/
+*.tmp
+*.temp
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
