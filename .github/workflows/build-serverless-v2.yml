@@ -1,0 +1,40 @@
+name: Build and Push Serverless Video Encoder v2
+
+on:
+  workflow_dispatch:  # Manual trigger
+  push:
+    paths:
+      - 'runpod/**'
+      - '.github/workflows/build-serverless-v2.yml'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./runpod
+        platforms: linux/amd64
+        push: true
+        tags: |
+          duongtamchannel2020/video-encoder:v2-serverless
+          duongtamchannel2020/video-encoder:latest-serverless
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        
+    - name: Image digest
+      run: echo "Image pushed successfully with serverless handler!"
