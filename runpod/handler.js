@@ -5,6 +5,7 @@ import { spawn } from 'child_process'
 import { fileURLToPath } from 'url'
 import { dirname } from 'path'
 import axios from 'axios'
+import OSS from 'ali-oss'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -123,7 +124,9 @@ const handleVideoEncoding = async (input) => {
         videoUrl,
         outputFormat = 'hls',
         quality = 'medium',
-        segments = { duration: 2, format: 'ts' }
+        segments = { duration: 2, format: 'ts' },
+        output = {},
+        ossConfig = null
     } = input
     
     if (!videoUrl) {
@@ -157,13 +160,34 @@ const handleVideoEncoding = async (input) => {
         console.log('🚀 Starting NVENC encoding...')
         const encodeResult = await encodeWithNVENC(inputFile, outputDir, quality, segments.duration)
         
-        // Step 4: Read output files
+        // Step 4: Process output files
         const m3u8Content = fs.readFileSync(path.join(outputDir, 'index.m3u8'), 'utf8')
         const tsFiles = fs.readdirSync(tsDir).filter(f => f.endsWith('.ts'))
+        
+        console.log(`📊 Created ${tsFiles.length} TS segments`)
+        
+        let segmentsData = []
+        let uploadedSegments = []
+        
+        // Check if we should upload to OSS storage
+        if (ossConfig && output.uploadToStorage) {
+            console.log('☁️ Uploading segments to OSS storage...')
+            uploadedSegments = await uploadSegmentsToOSS(tsDir, tsFiles, ossConfig, output.fakeExtensions)
+            
+            // Return format for server download
+            segmentsData = uploadedSegments
+        } else {
+            // Original format (local files only) 
+            segmentsData = tsFiles.map(file => ({
+                name: file,
+                size: fs.statSync(path.join(tsDir, file)).size
+            }))
+        }
         
         const processingTime = Date.now() - startTime
         
         const result = {
+            success: true, // Add success flag for server validation
             status: 'completed',
             processingTime: processingTime,
             processingTimeSeconds: (processingTime / 1000).toFixed(2),
@@ -173,10 +197,7 @@ const handleVideoEncoding = async (input) => {
                 segmentCount: tsFiles.length,
                 segmentDuration: segments.duration,
                 playlist: m3u8Content,
-                segments: tsFiles.map(file => ({
-                    name: file,
-                    size: fs.statSync(path.join(tsDir, file)).size
-                }))
+                segments: segmentsData
             },
             performance: {
                 inputSizeMB: (fileSize / 1024 / 1024).toFixed(2),
@@ -185,6 +206,13 @@ const handleVideoEncoding = async (input) => {
                 }, 0) / 1024 / 1024,
                 speedup: encodeResult.speedup || 'unknown'
             }
+        }
+        
+        // If uploaded to storage, add the segments array at top level for server compatibility
+        if (uploadedSegments.length > 0) {
+            result.segments = uploadedSegments
+            result.totalSegments = uploadedSegments.length
+            console.log(`✅ Uploaded ${uploadedSegments.length} segments to OSS`)
         }
         
         console.log('🎉 Encoding completed successfully!')
@@ -257,27 +285,42 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
         
         const args = [
             '-i', inputFile,
+            
+            // NVENC Pipeline encode tăng cường cho anime 3D - rực rỡ, nét căng, chi tiết cao
+            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2:out_range=full:flags=lanczos,eq=contrast=1.15:saturation=1.28:brightness=0.05:gamma=0.95,unsharp=5:5:1.2:5:5:0.8,format=yuv420p',
+            
+            // Encode H.264 bằng NVENC GPU
             '-c:v', 'h264_nvenc',
             '-preset', settings.preset,
             '-cq', settings.crf.toString(),
+            '-profile:v', 'high',
+            '-level', '4.1',
+            '-bf', '2', // B-frames for better compression
+            
+            // GOP theo segment: keyframe ổn định cho HLS
             '-g', gopSize.toString(),
             '-keyint_min', gopSize.toString(),
             '-force_key_frames', `expr:gte(t,n_forced*${segmentTime})`,
+            
+            // Audio encoding - AAC-LC optimized
             '-c:a', 'aac',
             '-b:a', '128k',
-            '-ac', '2',
-            '-ar', '48000',
+            '-ac', '2',      // Stereo
+            '-ar', '48000',  // 48 kHz sample rate
+            
+            // HLS specific settings
             '-hls_time', segmentTime.toString(),
             '-hls_playlist_type', 'vod',
-            '-hls_flags', 'independent_segments',
-            '-hls_list_size', '0',
+            '-hls_flags', 'independent_segments',  // Each segment can be decoded independently
+            '-hls_list_size', '0',                 // Include all segments in playlist
             '-start_number', '0',
             '-hls_segment_filename', path.join(outputDir, 'ts', '%03d.ts'),
             '-f', 'hls',
             path.join(outputDir, 'index.m3u8')
         ]
         
-        console.log('🔧 NVENC command: ffmpeg', args.join(' '))
+        console.log('🔧 NVENC Enhanced command: ffmpeg', args.join(' '))
+        console.log('🎨 Video Enhancement: Contrast+1.15, Saturation+1.28, Sharpening, Full Range')
         
         const startTime = Date.now()
         const proc = spawn('ffmpeg', args)
@@ -321,6 +364,73 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
     })
 }
 
+// Upload segments to OSS storage and return download URLs
+const uploadSegmentsToOSS = async (tsDir, tsFiles, ossConfig, useFakeExtensions = true) => {
+    console.log('🔧 Initializing OSS client...')
+    
+    try {
+        const client = new OSS({
+            region: ossConfig.region,
+            accessKeyId: ossConfig.accessKeyId,
+            accessKeySecret: ossConfig.accessKeySecret,
+            bucket: ossConfig.bucket
+        })
+        
+        console.log(`✅ OSS client initialized for bucket: ${ossConfig.bucket}`)
+        
+        // Define fake extensions for CDN bypass
+        const fakeExtensions = ['.png', '.jpg', '.webp', '.css', '.js', '.ico', '.svg', '.gif', '.txt', '.html']
+        const uploadedSegments = []
+        
+        for (let i = 0; i < tsFiles.length; i++) {
+            const tsFile = tsFiles[i]
+            const localPath = path.join(tsDir, tsFile)
+            
+            // Create filename with fake extension if requested
+            let remoteFileName
+            if (useFakeExtensions) {
+                const randomExt = fakeExtensions[Math.floor(Math.random() * fakeExtensions.length)]
+                const baseName = path.parse(tsFile).name // Remove .ts extension
+                remoteFileName = `${baseName}${randomExt}`
+            } else {
+                remoteFileName = tsFile
+            }
+            
+            // Create remote path with prefix
+            const remotePath = `${ossConfig.tempPrefix}${remoteFileName}`
+            
+            console.log(`📤 Uploading ${i + 1}/${tsFiles.length}: ${tsFile} -> ${remotePath}`)
+            
+            // Upload file to OSS
+            const uploadResult = await client.put(remotePath, localPath, {
+                headers: {
+                    'Content-Type': 'video/mp2t', // MPEG-2 Transport Stream
+                    'Cache-Control': 'public, max-age=3600' // 1 hour cache
+                }
+            })
+            
+            // Create download URL
+            const downloadUrl = `https://${ossConfig.cdnDomain}/${remotePath}`
+            
+            uploadedSegments.push({
+                filename: remoteFileName,
+                url: downloadUrl,
+                size: fs.statSync(localPath).size,
+                uploadTime: new Date().toISOString()
+            })
+            
+            console.log(`✅ Uploaded: ${downloadUrl}`)
+        }
+        
+        console.log(`🎉 Successfully uploaded ${uploadedSegments.length} segments to OSS`)
+        return uploadedSegments
+        
+    } catch (error) {
+        console.error('❌ OSS upload failed:', error)
+        throw new Error(`Failed to upload segments to OSS: ${error.message}`)
+    }
+}
+
 // Export the handler for RunPod
 export default handler
 
@@ -330,6 +440,23 @@ if (process.env.NODE_ENV !== 'production') {
     const testEvent = {
         input: {
             action: 'health'
+            // For encoding test:
+            // action: 'encode',
+            // videoUrl: 'https://sample-videos.com/zip/10/mp4/SampleVideo_1280x720_1mb.mp4',
+            // quality: 'medium',
+            // segments: { duration: 2 },
+            // output: {
+            //     uploadToStorage: true,
+            //     fakeExtensions: true
+            // },
+            // ossConfig: {
+            //     region: 'your-region',
+            //     accessKeyId: 'your-access-key',
+            //     accessKeySecret: 'your-secret',
+            //     bucket: 'your-bucket',
+            //     cdnDomain: 'your-cdn-domain.com',
+            //     tempPrefix: 'runpod-segments/test/'
+            // }
         }
     }
     
