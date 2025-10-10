@@ -1,0 +1,28 @@
+{
+  "name": "runpod-video-encoder",
+  "version": "2.0.0",
+  "description": "GPU-accelerated video encoding for RunPod serverless",
+  "main": "handler.js",
+  "type": "module",
+  "scripts": {
+    "start": "node handler.js",
+    "test": "python runpod_wrapper.py test"
+  },
+  "dependencies": {
+    "fluent-ffmpeg": "^2.1.2",
+    "axios": "^1.6.7",
+    "googleapis": "latest"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "video",
+    "encoding",
+    "ffmpeg",
+    "nvenc",
+    "runpod",
+    "serverless",
+    "gpu"
+  ]
+}
