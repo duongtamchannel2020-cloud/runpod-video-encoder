@@ -19,18 +19,22 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install
 
-# Copy encoding script
-COPY encode-worker.js ./
+# Copy handler script
+COPY handler.js ./
 
 # Create necessary directories
-RUN mkdir -p /app/temp /app/output
+RUN mkdir -p /tmp/encoding
 
 # Set environment variables
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+ENV NODE_ENV=production
 
-# Expose port for health check
-EXPOSE 8080
+# Install RunPod Python SDK (required for serverless)
+RUN pip install runpod
 
-# Start the worker
-CMD ["node", "encode-worker.js"]
+# Create RunPod wrapper
+COPY runpod_wrapper.py ./
+
+# Start the RunPod handler
+CMD ["python", "runpod_wrapper.py"]
