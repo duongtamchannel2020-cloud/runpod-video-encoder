@@ -1,0 +1,17 @@
+{
+  "name": "runpod-video-encoder",
+  "version": "1.0.0",
+  "description": "GPU-accelerated video encoding worker for RunPod",
+  "main": "encode-worker.js",
+  "type": "module",
+  "scripts": {
+    "start": "node encode-worker.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "fluent-ffmpeg": "^2.1.2",
+    "axios": "^1.6.7",
+    "multer": "^1.4.5-lts.1",
+    "winston": "^3.8.2"
+  }
+}
