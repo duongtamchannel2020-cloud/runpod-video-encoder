@@ -458,14 +458,16 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
                 '-y',
                 '-init_hw_device', 'cuda=gpu:0', '-filter_hw_device', 'gpu',
                 '-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda',
+                '-c:v', 'h264_cuvid',
                 '-i', inputFile,
 
-                // FILTERS GPU
-                '-vf', 'hwupload_cuda,scale_npp=trunc(iw/2)*2:trunc(ih/2)*2:interp_algo=lanczos,format=nv12',
+                // HYBRID GPU⇄CPU PIPELINE
+                '-vf', 'scale_npp=trunc(iw/2)*2:trunc(ih/2)*2:interp_algo=lanczos,hwdownload,format=yuv420p,eq=contrast=1.15:saturation=1.28:brightness=0.05:gamma=0.95,unsharp=3:3:0.8:3:3:0.5,hwupload_cuda,format=nv12',
 
                 // ENCODE NVENC
                 '-c:v', 'h264_nvenc',
-                '-preset', 'p1',              // p1 nhanh nhất (p4 hiện tại chậm hơn)
+                '-pix_fmt', 'nv12',
+                '-preset', 'p1',              // p1 nhanh nhất
                 '-rc', 'vbr', '-cq', '23',
                 '-b:v', '2500k', '-maxrate', '4000k', '-bufsize', '5000k',
                 '-profile:v', 'high', '-level', '4.1', '-bf', '2',
@@ -480,7 +482,7 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
                 '-hls_segment_filename', path.join(outputDir, 'ts', '%03d.ts'),
                 '-f', 'hls', path.join(outputDir, 'master.m3u8')
             ]
-            console.log('🎨 Full GPU Pipeline: CUDA decode → GPU filters → NVENC encode')
+            console.log('🎨 Hybrid GPU⇄CPU Pipeline: CUVID decode → GPU scale → CPU color grading → GPU upload → NVENC encode')
         } else {
             console.log('⚠️ NVENC not available, using software encoding')
             args = [
