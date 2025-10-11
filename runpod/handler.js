@@ -460,16 +460,8 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
                 '-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda',
                 '-i', inputFile,
 
-                // FIXED HYBRID GPU⇄CPU PIPELINE - stable format chain with explicit pixel format
-                '-color_range', 'tv', '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709',
-                '-vf', [
-                    'scale_npp=trunc(iw/2)*2:trunc(ih/2)*2:interp_algo=lanczos',
-                    'hwdownload,format=nv12',
-                    'format=yuv420p',
-                    'eq=contrast=1.15:saturation=1.28:brightness=0.05:gamma=0.95',
-                    'unsharp=3:3:0.8:3:3:0.5',
-                    'format=nv12,hwupload_cuda=extra_hw_frames=64'
-                ].join(','),
+                // FULL GPU PIPELINE - no CPU/GPU conversion to avoid conflicts
+                '-vf', 'scale_npp=trunc(iw/2)*2:trunc(ih/2)*2:interp_algo=lanczos,format=nv12',
 
                 // ENCODE NVENC - explicit pix_fmt to prevent auto_scale injection
                 '-c:v', 'h264_nvenc',
