@@ -1,12 +1,25 @@
 # RunPod Video Encoding Template
 FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel
 
-# Install FFmpeg with CUDA support
+# Install basic dependencies
 RUN apt-get update && apt-get install -y \
-    ffmpeg \
     wget \
     curl \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# Install latest FFmpeg with NVENC support (static build)
+RUN echo "🔧 Installing FFmpeg with NVENC support..." \
+    && wget -q https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz \
+    && tar -xf ffmpeg-master-latest-linux64-gpl.tar.xz \
+    && cp ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/ \
+    && cp ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/ \
+    && chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe \
+    && rm -rf ffmpeg-master-latest-linux64-gpl* \
+    && echo "✅ FFmpeg installation complete" \
+    && ffmpeg -version | head -5 \
+    && echo "🔍 Checking NVENC encoders..." \
+    && ffmpeg -encoders 2>/dev/null | grep nvenc || echo "⚠️ NVENC encoders check completed"
 
 # Install Node.js for our processing script
 RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
