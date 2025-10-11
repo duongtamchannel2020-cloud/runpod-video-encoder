@@ -42,7 +42,7 @@ WORKDIR /app
 
 # Copy package.json and install Node.js dependencies
 COPY package.json ./
-RUN npm ci --only=production
+RUN npm install --production
 
 # Copy application files
 COPY handler.js runpod_wrapper.py ./
