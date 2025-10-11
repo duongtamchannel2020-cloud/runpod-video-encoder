@@ -458,15 +458,19 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
                 '-y',
                 '-init_hw_device', 'cuda=gpu:0', '-filter_hw_device', 'gpu',
                 '-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda',
-                '-c:v', 'h264_cuvid',
                 '-i', inputFile,
 
-                // HYBRID GPU⇄CPU PIPELINE
-                '-vf', 'scale_npp=trunc(iw/2)*2:trunc(ih/2)*2:interp_algo=lanczos,hwdownload,format=yuv420p,eq=contrast=1.15:saturation=1.28:brightness=0.05:gamma=0.95,unsharp=3:3:0.8:3:3:0.5,hwupload_cuda,format=nv12',
+                // CORRECTED HYBRID GPU⇄CPU PIPELINE - proper format order
+                '-vf', [
+                    'scale_npp=trunc(iw/2)*2:trunc(ih/2)*2:interp_algo=lanczos',
+                    'hwdownload,format=yuv420p',
+                    'eq=contrast=1.15:saturation=1.28:brightness=0.05:gamma=0.95',
+                    'unsharp=3:3:0.8:3:3:0.5',
+                    'format=nv12,hwupload=extra_hw_frames=64'
+                ].join(','),
 
-                // ENCODE NVENC
+                // ENCODE NVENC - no pix_fmt needed for hw frames
                 '-c:v', 'h264_nvenc',
-                '-pix_fmt', 'nv12',
                 '-preset', 'p1',              // p1 nhanh nhất
                 '-rc', 'vbr', '-cq', '23',
                 '-b:v', '2500k', '-maxrate', '4000k', '-bufsize', '5000k',
@@ -482,7 +486,7 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
                 '-hls_segment_filename', path.join(outputDir, 'ts', '%03d.ts'),
                 '-f', 'hls', path.join(outputDir, 'master.m3u8')
             ]
-            console.log('🎨 Hybrid GPU⇄CPU Pipeline: CUVID decode → GPU scale → CPU color grading → GPU upload → NVENC encode')
+            console.log('🎨 Fixed Hybrid Pipeline: GPU decode → GPU scale → CPU color grading → format+upload → NVENC encode')
         } else {
             console.log('⚠️ NVENC not available, using software encoding')
             args = [
