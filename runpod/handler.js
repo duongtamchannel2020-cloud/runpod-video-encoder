@@ -353,8 +353,62 @@ const downloadVideo = async (url, outputPath) => {
 const downloadVideoFromGoogleDrive = async (driveId, token, outputPath) => {
     console.log(`📥 Downloading from Google Drive: ${driveId}`)
     
+    // CRITICAL DEBUG: Check token received by RunPod handler
+    console.log('🔍 RUNPOD HANDLER TOKEN DEBUG:')
+    console.log(`- Token type: ${typeof token}`)
+    console.log(`- Token is null/undefined: ${token == null}`)
+    if (token) {
+        console.log(`- Token keys: [${Object.keys(token).join(', ')}]`)
+        console.log(`- access_token exists: ${!!token.access_token}`)
+        console.log(`- access_token preview: ${token.access_token ? token.access_token.substring(0, 30) + '...' : 'MISSING'}`)
+        console.log(`- expires_at: ${token.expires_at || 'missing'}`)
+        console.log(`- expiry_date: ${token.expiry_date || 'missing'}`)
+        
+        // CRITICAL TIME COMPARISON
+        const now = Date.now()
+        const serverTime = new Date().toISOString()
+        const tokenExpiryTime = token.expiry_date ? new Date(token.expiry_date).toISOString() : 'N/A'
+        const timeUntilExpiry = token.expiry_date ? token.expiry_date - now : 0
+        const minutesUntilExpiry = Math.round(timeUntilExpiry / 1000 / 60)
+        
+        console.log(`🕐 RUNPOD SERVER TIME ANALYSIS:`)
+        console.log(`- RunPod server timestamp: ${now}`)
+        console.log(`- RunPod server time: ${serverTime}`)
+        console.log(`- Token expiry timestamp: ${token.expiry_date || 'missing'}`)
+        console.log(`- Token expiry time: ${tokenExpiryTime}`)
+        console.log(`- Time until expiry (ms): ${timeUntilExpiry}`)
+        console.log(`- Time until expiry (minutes): ${minutesUntilExpiry}`)
+        console.log(`- Token valid on RunPod server: ${token.expiry_date ? token.expiry_date > now : 'unknown'}`)
+        
+        // Test the actual token against Google API immediately
+        console.log(`🧪 TESTING TOKEN AGAINST GOOGLE API FROM RUNPOD...`)
+    }
+    
     try {
+        // IMMEDIATE TOKEN TEST: Test token validity before attempting file download
+        console.log(`🧪 Testing token validity against Google API...`)
+        try {
+            const tokenTestResponse = await axios.get(
+                'https://www.googleapis.com/oauth2/v1/tokeninfo',
+                {
+                    params: {
+                        access_token: token.access_token
+                    },
+                    timeout: 10000
+                }
+            )
+            console.log(`✅ Token test PASSED:`, tokenTestResponse.data)
+            console.log(`- Token scope: ${tokenTestResponse.data.scope}`)
+            console.log(`- Token expires in: ${tokenTestResponse.data.expires_in} seconds`)
+        } catch (tokenTestError) {
+            console.log(`❌ Token test FAILED:`, tokenTestError.response?.data || tokenTestError.message)
+            console.log(`- Response status: ${tokenTestError.response?.status}`)
+            console.log(`- This explains the 401 error!`)
+            throw new Error(`Token validation failed: ${tokenTestError.response?.data?.error_description || tokenTestError.message}`)
+        }
+        
         // Get file metadata first to check size
+        console.log(`📊 Token passed validation, attempting file metadata request...`)
         const metadataResponse = await axios.get(
             `https://www.googleapis.com/drive/v3/files/${driveId}`,
             {
