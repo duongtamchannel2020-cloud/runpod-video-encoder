@@ -1,20 +1,12 @@
-# Multi-stage build for NVENC-compatible FFmpeg
-# Stage 1: Get FFmpeg with NVENC support compatible with driver 550.x
-FROM jrottenberg/ffmpeg:6.1-nvidia AS ffmpeg
+# Use FFmpeg image with NVENC support directly (compatible with driver 550.x)
+FROM jrottenberg/ffmpeg:6.1-nvidia
 
-# Stage 2: Runtime with CUDA 12.4 for better compatibility
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
-
-# Install essential dependencies
+# Install additional dependencies
 RUN apt-get update && apt-get install -y \
     curl \
     ca-certificates \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*
-
-# Copy FFmpeg binaries with NVENC support (compatible with driver 550.x)
-COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
-COPY --from=ffmpeg /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 
 # Set NVIDIA environment for video encoding
 ENV NVIDIA_VISIBLE_DEVICES=all
@@ -31,7 +23,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
 RUN pip3 install --no-cache-dir runpod
 
 # Verify FFmpeg NVENC support during build
-RUN echo "� Verifying FFmpeg NVENC compatibility..." \
+RUN echo "🔧 Verifying FFmpeg NVENC compatibility..." \
     && ffmpeg -version | head -3 \
     && echo "🔍 Available NVENC encoders:" \
     && (ffmpeg -encoders 2>/dev/null | grep nvenc || echo "⚠️ NVENC check will be done at runtime") \
