@@ -456,14 +456,11 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
             console.log('🚀 Using NVIDIA NVENC GPU encoding')
             args = [
                 '-y',
-                '-init_hw_device', 'cuda=gpu:0',
-                '-filter_hw_device', 'gpu',
                 '-hwaccel', 'cuda',
-                '-hwaccel_output_format', 'cuda',
                 '-i', inputFile,
                 
-                // GPU scaling (tránh kéo về CPU trước khi encode)
-                '-vf', 'hwupload,scale_npp=trunc(iw/2)*2:trunc(ih/2)*2:interp_algo=lanczos',
+                // Use CPU filters for compatibility - GPU encoding still works
+                '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
                 
                 // NVENC H.264 encoding
                 '-c:v', 'h264_nvenc',
