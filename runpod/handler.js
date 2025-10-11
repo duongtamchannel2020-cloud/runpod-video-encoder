@@ -460,10 +460,11 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
                 '-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda',
                 '-i', inputFile,
 
-                // CORRECTED HYBRID GPU⇄CPU PIPELINE - proper format order
+                // CORRECTED HYBRID GPU⇄CPU PIPELINE - fixed hwdownload format
                 '-vf', [
                     'scale_npp=trunc(iw/2)*2:trunc(ih/2)*2:interp_algo=lanczos',
-                    'hwdownload,format=yuv420p',
+                    'hwdownload,format=nv12',
+                    'format=yuv420p',
                     'eq=contrast=1.15:saturation=1.28:brightness=0.05:gamma=0.95',
                     'unsharp=3:3:0.8:3:3:0.5',
                     'format=nv12,hwupload=extra_hw_frames=64'
