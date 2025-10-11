@@ -70,26 +70,26 @@ RUN echo '#!/bin/bash' > /app/startup.sh \
  && echo '# Show current device mapping from host' >> /app/startup.sh \
  && echo 'python3 -c "' >> /app/startup.sh \
  && echo 'import ctypes, os' >> /app/startup.sh \
- && echo 'print(f\"Process PID: {os.getpid()}\")' >> /app/startup.sh \
- && echo 'print(f\"CUDA_VISIBLE_DEVICES: {os.environ.get(\"CUDA_VISIBLE_DEVICES\", \"unset\")}\")' >> /app/startup.sh \
- && echo 'print(f\"NVIDIA_VISIBLE_DEVICES: {os.environ.get(\"NVIDIA_VISIBLE_DEVICES\", \"unset\")}\")' >> /app/startup.sh \
+ && echo 'print(\"Process PID:\", os.getpid())' >> /app/startup.sh \
+ && echo 'print(\"CUDA_VISIBLE_DEVICES:\", os.environ.get(\"CUDA_VISIBLE_DEVICES\", \"unset\"))' >> /app/startup.sh \
+ && echo 'print(\"NVIDIA_VISIBLE_DEVICES:\", os.environ.get(\"NVIDIA_VISIBLE_DEVICES\", \"unset\"))' >> /app/startup.sh \
  && echo 'try:' >> /app/startup.sh \
  && echo '    cuda = ctypes.CDLL(\"libcuda.so.1\")' >> /app/startup.sh \
  && echo '    result = cuda.cuInit(0)' >> /app/startup.sh \
- && echo '    print(f\"cuInit(0) result: {result} (0=success)\")' >> /app/startup.sh \
+ && echo '    print(\"cuInit(0) result:\", result, \"(0=success)\")' >> /app/startup.sh \
  && echo '    if result == 0:' >> /app/startup.sh \
  && echo '        device_count = ctypes.c_int(0)' >> /app/startup.sh \
  && echo '        cuda.cuDeviceGetCount(ctypes.byref(device_count))' >> /app/startup.sh \
- && echo '        print(f\"CUDA device count: {device_count.value}\")' >> /app/startup.sh \
+ && echo '        print(\"CUDA device count:\", device_count.value)' >> /app/startup.sh \
  && echo '        for i in range(device_count.value):' >> /app/startup.sh \
  && echo '            device = ctypes.c_int(0)' >> /app/startup.sh \
  && echo '            cuda.cuDeviceGet(ctypes.byref(device), i)' >> /app/startup.sh \
- && echo '            print(f\"  Device {i}: ID {device.value}\")' >> /app/startup.sh \
+ && echo '            print(\"  Device\", i, \": ID\", device.value)' >> /app/startup.sh \
  && echo '        print(\"✅ CUDA initialization successful!\")' >> /app/startup.sh \
  && echo '    else:' >> /app/startup.sh \
- && echo '        print(f\"❌ CUDA init failed: {result}\")' >> /app/startup.sh \
+ && echo '        print(\"❌ CUDA init failed:\", result)' >> /app/startup.sh \
  && echo 'except Exception as e:' >> /app/startup.sh \
- && echo '    print(f\"❌ CUDA enumeration error: {e}\")' >> /app/startup.sh \
+ && echo '    print(\"❌ CUDA enumeration error:\", e)' >> /app/startup.sh \
  && echo '"' >> /app/startup.sh \
  && echo 'echo "🧪 NVENC Direct Test (stable context):"' >> /app/startup.sh \
  && echo 'if timeout 10 ffmpeg -hide_banner -init_hw_device cuda=gpu:0 -filter_hw_device gpu -f lavfi -i color=c=black:s=64x64:d=0.1:r=1 -vf hwupload,scale_npp=64:64 -c:v h264_nvenc -preset p1 -f null - 2>&1; then' >> /app/startup.sh \
