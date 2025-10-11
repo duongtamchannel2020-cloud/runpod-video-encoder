@@ -438,22 +438,21 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
             args = [
                 '-y',
                 '-hwaccel', 'cuda',
-                '-hwaccel_output_format', 'cuda',
+                '-hwaccel_device', '0',
                 '-i', inputFile,
                 
-                // NVENC Pipeline with GPU filters
-                '-vf', 'scale_cuda=trunc(iw/2)*2:trunc(ih/2)*2,hwdownload,format=yuv420p,eq=contrast=1.15:saturation=1.28:brightness=0.05:gamma=0.95,unsharp=5:5:1.2:5:5:0.8',
+                // NVENC Pipeline - fix GPU access
+                '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2,eq=contrast=1.15:saturation=1.28:brightness=0.05:gamma=0.95,unsharp=5:5:1.2:5:5:0.8',
                 
-                // NVENC H.264 encoding
+                // NVENC H.264 encoding with explicit GPU selection
                 '-c:v', 'h264_nvenc',
+                '-gpu', '0',
                 '-preset', settings.preset,
                 '-rc', 'constqp',
                 '-qp', settings.qp.toString(),
                 '-profile:v', 'high',
                 '-level', '4.1',
                 '-bf', '2',
-                '-spatial_aq', '1',
-                '-temporal_aq', '1',
                 
                 // GOP settings
                 '-g', gopSize.toString(),
@@ -688,11 +687,14 @@ const checkNVENCAvailability = async () => {
                 
                 console.log('🔧 Step 3: Testing NVENC encoding capability...')
                 
-                // Test NVENC encoding capability
+                // Test NVENC encoding capability with proper GPU selection
                 const testArgs = [
+                    '-hwaccel', 'cuda',
+                    '-hwaccel_device', '0',
                     '-f', 'lavfi',
                     '-i', 'testsrc=duration=1:size=320x240:rate=1',
                     '-c:v', 'h264_nvenc',
+                    '-gpu', '0',
                     '-t', '1',
                     '-f', 'null',
                     '-'
