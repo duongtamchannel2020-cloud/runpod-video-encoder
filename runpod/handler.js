@@ -456,45 +456,31 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
             console.log('🚀 Using NVIDIA NVENC GPU encoding')
             args = [
                 '-y',
-                '-hwaccel', 'cuda',
+                '-init_hw_device', 'cuda=gpu:0', '-filter_hw_device', 'gpu',
+                '-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda',
                 '-i', inputFile,
-                
-                // Use CPU filters for compatibility - GPU encoding still works
-                '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-                
-                // NVENC H.264 encoding
+
+                // FILTERS GPU
+                '-vf', 'hwupload_cuda,scale_npp=trunc(iw/2)*2:trunc(ih/2)*2:interp_algo=lanczos,format=nv12',
+
+                // ENCODE NVENC
                 '-c:v', 'h264_nvenc',
-                '-preset', settings.preset,
-                '-rc', 'vbr',
-                '-cq', '23',
-                '-b:v', '2500k',
-                '-maxrate', '4000k',
-                '-bufsize', '5000k',
-                '-profile:v', 'high',
-                '-level', '4.1',
-                '-bf', '2',
-                '-spatial_aq', '1',
-                '-temporal_aq', '1',
-                
-                // GOP settings
-                '-g', gopSize.toString(),
-                '-keyint_min', gopSize.toString(),
+                '-preset', 'p1',              // p1 nhanh nhất (p4 hiện tại chậm hơn)
+                '-rc', 'vbr', '-cq', '23',
+                '-b:v', '2500k', '-maxrate', '4000k', '-bufsize', '5000k',
+                '-profile:v', 'high', '-level', '4.1', '-bf', '2',
+                '-spatial_aq', '1', '-temporal_aq', '1',
+
+                // GOP & HLS giữ nguyên như bạn
+                '-g', gopSize.toString(), '-keyint_min', gopSize.toString(),
                 '-force_key_frames', `expr:gte(t,n_forced*${segmentTime})`,
-                
-                // Audio
                 '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '48000',
-                
-                // HLS
-                '-hls_time', segmentTime.toString(),
-                '-hls_playlist_type', 'vod',
-                '-hls_flags', 'independent_segments',
-                '-hls_list_size', '0',
-                '-start_number', '0',
+                '-hls_time', segmentTime.toString(), '-hls_playlist_type', 'vod',
+                '-hls_flags', 'independent_segments', '-hls_list_size', '0', '-start_number', '0',
                 '-hls_segment_filename', path.join(outputDir, 'ts', '%03d.ts'),
-                '-f', 'hls',
-                path.join(outputDir, 'master.m3u8')
+                '-f', 'hls', path.join(outputDir, 'master.m3u8')
             ]
-            console.log('🎨 GPU Enhancement: CUDA + NVENC + Contrast+1.15 + Saturation+1.28')
+            console.log('🎨 Full GPU Pipeline: CUDA decode → GPU filters → NVENC encode')
         } else {
             console.log('⚠️ NVENC not available, using software encoding')
             args = [
