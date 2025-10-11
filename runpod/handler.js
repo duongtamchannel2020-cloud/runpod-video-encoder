@@ -11,6 +11,21 @@ import { google } from 'googleapis'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
+// Build proper FFmpeg environment with correct device mapping
+const buildFfmpegEnv = () => {
+    const env = { ...process.env }
+    // Ưu tiên UUID do host set; nếu không có thì fallback index 0
+    if (process.env.NVIDIA_VISIBLE_DEVICES && process.env.NVIDIA_VISIBLE_DEVICES !== 'all') {
+        env.CUDA_VISIBLE_DEVICES = process.env.NVIDIA_VISIBLE_DEVICES // chấp nhận UUID
+    } else {
+        env.CUDA_VISIBLE_DEVICES = 
+            env.CUDA_VISIBLE_DEVICES && env.CUDA_VISIBLE_DEVICES !== 'all' ? env.CUDA_VISIBLE_DEVICES : '0'
+    }
+    env.NVIDIA_DRIVER_CAPABILITIES = env.NVIDIA_DRIVER_CAPABILITIES || 'compute,utility,video'
+    env.CUDA_DEVICE_ORDER = 'PCI_BUS_ID'
+    return env
+}
+
 // RunPod serverless handler
 const handler = async (event) => {
     const { input } = event
@@ -89,7 +104,7 @@ const handleHealthCheck = async () => {
     // Check FFmpeg availability
     try {
         await new Promise((resolve, reject) => {
-            const proc = spawn('ffmpeg', ['-version'])
+            const proc = spawn('ffmpeg', ['-version'], { env: buildFfmpegEnv() })
             let output = ''
             
             proc.stdout.on('data', (data) => {
@@ -118,7 +133,7 @@ const handleHealthCheck = async () => {
     // Check NVIDIA-SMI
     try {
         await new Promise((resolve, reject) => {
-            const proc = spawn('nvidia-smi', ['--query-gpu=name,driver_version,memory.total', '--format=csv,noheader'])
+            const proc = spawn('nvidia-smi', ['--query-gpu=name,driver_version,memory.total', '--format=csv,noheader'], { env: buildFfmpegEnv() })
             let output = ''
             
             proc.stdout.on('data', (data) => {
@@ -218,7 +233,7 @@ const handleVideoEncoding = async (input) => {
         })
         
         // Step 3: Encode with NVENC
-        console.log('� STEP 3: Starting GPU/CPU encoding...')
+        console.log('🛠️ STEP 3: Starting GPU/CPU encoding...')
         const encodeStartTime = Date.now()
         const encodeResult = await encodeWithNVENC(inputFile, outputDir, quality, segments.duration)
         const encodeTime = Date.now() - encodeStartTime
@@ -411,7 +426,11 @@ const getVideoInfo = async (inputFile) => {
                     bitrate: metadata.format.bit_rate,
                     width: videoStream?.width,
                     height: videoStream?.height,
-                    fps: eval(videoStream?.r_frame_rate) || 30
+                    fps: (() => {
+                        const fr = (videoStream?.r_frame_rate || '0/1').split('/')
+                        const num = parseFloat(fr[0] || '0'), den = parseFloat(fr[1] || '1')
+                        return den ? num/den : 0
+                    })() || 30
                 })
             }
         })
@@ -437,22 +456,28 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
             console.log('🚀 Using NVIDIA NVENC GPU encoding')
             args = [
                 '-y',
+                '-init_hw_device', 'cuda=gpu:0',
+                '-filter_hw_device', 'gpu',
                 '-hwaccel', 'cuda',
-                '-hwaccel_device', '0',
+                '-hwaccel_output_format', 'cuda',
                 '-i', inputFile,
                 
-                // NVENC Pipeline - fix GPU access
-                '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2,eq=contrast=1.15:saturation=1.28:brightness=0.05:gamma=0.95,unsharp=5:5:1.2:5:5:0.8',
+                // GPU scaling (tránh kéo về CPU trước khi encode)
+                '-vf', 'hwupload,scale_npp=trunc(iw/2)*2:trunc(ih/2)*2:interp_algo=lanczos',
                 
-                // NVENC H.264 encoding with explicit GPU selection
+                // NVENC H.264 encoding
                 '-c:v', 'h264_nvenc',
-                '-gpu', '0',
                 '-preset', settings.preset,
-                '-rc', 'constqp',
-                '-qp', settings.qp.toString(),
+                '-rc', 'vbr',
+                '-cq', '23',
+                '-b:v', '2500k',
+                '-maxrate', '4000k',
+                '-bufsize', '5000k',
                 '-profile:v', 'high',
                 '-level', '4.1',
                 '-bf', '2',
+                '-spatial_aq', '1',
+                '-temporal_aq', '1',
                 
                 // GOP settings
                 '-g', gopSize.toString(),
@@ -515,7 +540,7 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
         console.log('🔧 FFmpeg command: ffmpeg', args.join(' '))
         
         const startTime = Date.now()
-        const proc = spawn('ffmpeg', args)
+        const proc = spawn('ffmpeg', args, { env: buildFfmpegEnv() })
         let logs = ''
         let lastProgressTime = 0
         
@@ -607,7 +632,7 @@ const checkNVENCAvailability = async () => {
         
         // First, check if nvidia-smi exists and is accessible
         console.log('🔧 Step 1: Checking nvidia-smi accessibility...')
-        const nvidiaCheck = spawn('nvidia-smi', ['-L'])
+        const nvidiaCheck = spawn('nvidia-smi', ['-L'], { env: buildFfmpegEnv() })
         let hasNvidiaGPU = false
         let gpuInfo = ''
         
@@ -637,7 +662,7 @@ const checkNVENCAvailability = async () => {
             
             // Check FFmpeg NVENC encoders
             console.log('🔧 Step 2: Checking FFmpeg NVENC encoders...')
-            const encoderCheck = spawn('ffmpeg', ['-encoders'])
+            const encoderCheck = spawn('ffmpeg', ['-encoders'], { env: buildFfmpegEnv() })
             let encoderOutput = ''
             let encoderError = ''
             
@@ -687,21 +712,22 @@ const checkNVENCAvailability = async () => {
                 
                 console.log('🔧 Step 3: Testing NVENC encoding capability...')
                 
-                // Test NVENC encoding capability with proper GPU selection
+                // Test NVENC encoding capability with stable CUDA context
+                const env = buildFfmpegEnv()
                 const testArgs = [
-                    '-hwaccel', 'cuda',
-                    '-hwaccel_device', '0',
+                    '-hide_banner',
+                    '-init_hw_device', 'cuda=gpu:0',
+                    '-filter_hw_device', 'gpu',
                     '-f', 'lavfi',
-                    '-i', 'testsrc=duration=1:size=320x240:rate=1',
+                    '-i', 'color=c=black:s=320x240:d=1:r=1',
+                    '-vf', 'hwupload,scale_npp=320:240:interp_algo=lanczos',
                     '-c:v', 'h264_nvenc',
-                    '-gpu', '0',
                     '-t', '1',
-                    '-f', 'null',
-                    '-'
+                    '-f', 'null', '-'
                 ]
                 
                 console.log('🧪 Testing NVENC with command: ffmpeg', testArgs.join(' '))
-                const testProc = spawn('ffmpeg', testArgs)
+                const testProc = spawn('ffmpeg', testArgs, { env })
                 let testError = false
                 let testOutput = ''
                 let testStderr = ''
