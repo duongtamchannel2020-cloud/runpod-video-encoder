@@ -17,9 +17,14 @@ RUN echo "🔧 Installing FFmpeg with NVENC support..." \
     && chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe \
     && rm -rf ffmpeg-master-latest-linux64-gpl* \
     && echo "✅ FFmpeg installation complete" \
+    && echo "📊 FFmpeg version:" \
     && ffmpeg -version | head -5 \
-    && echo "🔍 Checking NVENC encoders..." \
-    && ffmpeg -encoders 2>/dev/null | grep nvenc || echo "⚠️ NVENC encoders check completed"
+    && echo "🔍 Available NVENC encoders:" \
+    && (ffmpeg -encoders 2>/dev/null | grep nvenc | head -10 || echo "⚠️ No NVENC encoders found") \
+    && echo "🔍 Available hardware acceleration:" \
+    && (ffmpeg -hwaccels 2>/dev/null || echo "⚠️ Hardware acceleration check failed") \
+    && echo "🔧 FFmpeg build info:" \
+    && (ffmpeg -buildconf 2>/dev/null | grep -E "(nvenc|cuda)" || echo "⚠️ No NVENC/CUDA in build config")
 
 # Install Node.js for our processing script
 RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
@@ -38,10 +43,16 @@ COPY handler.js ./
 # Create necessary directories
 RUN mkdir -p /tmp/encoding
 
-# Set environment variables
+# Set environment variables for NVIDIA runtime
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+ENV CUDA_VISIBLE_DEVICES=all
 ENV NODE_ENV=production
+
+# Verify NVIDIA runtime during build (if available)
+RUN echo "🔍 Checking NVIDIA runtime availability..." \
+    && (nvidia-smi -L 2>/dev/null && echo "✅ NVIDIA runtime available during build" || echo "⚠️ NVIDIA runtime not available during build (expected in non-GPU build environment)") \
+    && echo "🔧 Environment variables set for GPU runtime"
 
 # Install RunPod Python SDK (required for serverless)
 RUN pip install runpod
