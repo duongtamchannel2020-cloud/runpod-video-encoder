@@ -460,17 +460,22 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
                 '-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda',
                 '-i', inputFile,
 
-                // FULL GPU PIPELINE - no CPU/GPU conversion to avoid conflicts
-                '-vf', 'scale_npp=trunc(iw/2)*2:trunc(ih/2)*2:interp_algo=lanczos,format=nv12',
+                // FULL GPU PIPELINE - pure CUDA chain without format conversion
+                '-vf', 'scale_npp=trunc(iw/2)*2:trunc(ih/2)*2:interp_algo=lanczos',
 
-                // ENCODE NVENC - explicit pix_fmt to prevent auto_scale injection
+                // ENCODE NVENC - with enhanced color and sharpness settings
                 '-c:v', 'h264_nvenc',
                 '-pix_fmt', 'nv12',           // CRITICAL: explicit pixel format for NVENC
                 '-preset', 'p1',              // p1 nhanh nhất
-                '-rc', 'vbr', '-cq', '23',
-                '-b:v', '2500k', '-maxrate', '4000k', '-bufsize', '5000k',
+                '-rc', 'vbr', '-cq', '21',    // Giảm từ 23 xuống 21 cho chất lượng tốt hơn
+                '-b:v', '3000k', '-maxrate', '5000k', '-bufsize', '6000k', // Tăng bitrate cho màu đẹp hơn
                 '-profile:v', 'high', '-level', '4.1', '-bf', '2',
                 '-spatial_aq', '1', '-temporal_aq', '1',
+                // Enhanced color and sharpness for NVENC
+                '-weighted_pred', '1',        // Weighted prediction cho màu tự nhiên hơn
+                '-rc-lookahead', '20',        // Lookahead cho bitrate allocation tốt hơn
+                '-surfaces', '32',            // Tăng surfaces cho encoding mượt hơn
+                '-refs', '3',                 // Reference frames cho detail tốt hơn
 
                 // GOP & HLS giữ nguyên như bạn
                 '-g', gopSize.toString(), '-keyint_min', gopSize.toString(),
