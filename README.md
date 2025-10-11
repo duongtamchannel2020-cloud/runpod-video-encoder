@@ -12,7 +12,9 @@ GPU-accelerated video encoding using NVIDIA NVENC for RunPod serverless platform
 
 ✅ **Serverless Handler Format** - Proper RunPod integration  
 ✅ **NVIDIA NVENC Encoding** - Hardware GPU acceleration  
-✅ **HLS Output** - Segmented video for streaming  
+✅ **Google Drive Integration** - Direct download from Drive  
+✅ **HLS Output** - Segmented video for streaming with master.m3u8  
+✅ **OSS Upload** - Direct upload to Alibaba Cloud OSS  
 ✅ **Health Monitoring** - System status and GPU checks  
 ✅ **Auto Cleanup** - Temporary file management  
 ✅ **Error Handling** - Comprehensive error reporting  
@@ -57,9 +59,11 @@ Encodes video with NVENC acceleration.
 ## Build Instructions
 
 1. Update code in this directory
-2. Commit and push to GitHub  
-3. GitHub Actions will build and push to Docker Hub
-4. Use the new image tag in RunPod template
+2. Build Docker image: `docker build -t duongtamchannel2020/video-encoder:latest .`
+3. Push to Docker Hub: `docker push duongtamchannel2020/video-encoder:latest`
+4. Update RunPod template with new image
+
+> **Note**: All dependencies (including `googleapis` for Google Drive) are automatically installed during Docker build via `npm install`.
 
 ## Files Structure
 
