@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url'
 import { dirname } from 'path'
 import axios from 'axios'
 import OSS from 'ali-oss'
+import { google } from 'googleapis'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -122,15 +123,28 @@ const handleVideoEncoding = async (input) => {
     
     const {
         videoUrl,
+        driveId,
+        googleToken,
+        md5DriveId,
         outputFormat = 'hls',
         quality = 'medium',
         segments = { duration: 2, format: 'ts' },
         output = {},
-        ossConfig = null
+        ossConfig = null,
+        cdnDomains = {}
     } = input
     
-    if (!videoUrl) {
-        throw new Error('videoUrl is required for encoding')
+    // Support both videoUrl (legacy) and driveId (new method)
+    if (!videoUrl && !driveId) {
+        throw new Error('Either videoUrl or driveId is required for encoding')
+    }
+    
+    if (driveId && !googleToken) {
+        throw new Error('googleToken is required when using driveId')
+    }
+    
+    if (!md5DriveId) {
+        throw new Error('md5DriveId is required for output organization')
     }
     
     const startTime = Date.now()
@@ -146,10 +160,16 @@ const handleVideoEncoding = async (input) => {
     
     try {
         // Step 1: Download video
-        console.log('📥 Downloading video from:', videoUrl)
-        await downloadVideo(videoUrl, inputFile)
+        let fileSize
+        if (driveId) {
+            console.log('📥 Downloading video from Google Drive ID:', driveId)
+            await downloadVideoFromGoogleDrive(driveId, googleToken, inputFile)
+        } else {
+            console.log('📥 Downloading video from URL:', videoUrl)
+            await downloadVideo(videoUrl, inputFile)
+        }
         
-        const fileSize = fs.statSync(inputFile).size
+        fileSize = fs.statSync(inputFile).size
         console.log(`✅ Downloaded ${(fileSize / 1024 / 1024).toFixed(2)}MB`)
         
         // Step 2: Get video info
@@ -161,7 +181,7 @@ const handleVideoEncoding = async (input) => {
         const encodeResult = await encodeWithNVENC(inputFile, outputDir, quality, segments.duration)
         
         // Step 4: Process output files
-        const m3u8Content = fs.readFileSync(path.join(outputDir, 'index.m3u8'), 'utf8')
+        const m3u8Content = fs.readFileSync(path.join(outputDir, 'master.m3u8'), 'utf8')
         const tsFiles = fs.readdirSync(tsDir).filter(f => f.endsWith('.ts'))
         
         console.log(`📊 Created ${tsFiles.length} TS segments`)
@@ -172,7 +192,18 @@ const handleVideoEncoding = async (input) => {
         // Check if we should upload to OSS storage
         if (ossConfig && output.uploadToStorage) {
             console.log('☁️ Uploading segments to OSS storage...')
-            uploadedSegments = await uploadSegmentsToOSS(tsDir, tsFiles, ossConfig, output.fakeExtensions)
+            uploadedSegments = await uploadSegmentsToOSS(tsDir, tsFiles, ossConfig, output.fakeExtensions, md5DriveId)
+            
+            // Step 5: Create and upload M3U8 playlist to OSS
+            console.log('📋 Creating and uploading M3U8 playlist to OSS...')
+            const m3u8Url = await createAndUploadM3U8ToOSS(
+                uploadedSegments, 
+                m3u8Content, 
+                ossConfig, 
+                md5DriveId, 
+                cdnDomains,
+                segments.duration
+            )
             
             // Return format for server download
             segmentsData = uploadedSegments
@@ -212,7 +243,9 @@ const handleVideoEncoding = async (input) => {
         if (uploadedSegments.length > 0) {
             result.segments = uploadedSegments
             result.totalSegments = uploadedSegments.length
-            console.log(`✅ Uploaded ${uploadedSegments.length} segments to OSS`)
+            result.m3u8Url = result.m3u8Url || `https://${cdnDomains.m3u8 || ossConfig.cdnDomain}/${md5DriveId}.m3u8`
+            result.uploadedToStorage = true
+            console.log(`✅ Uploaded ${uploadedSegments.length} segments + M3U8 to OSS`)
         }
         
         console.log('🎉 Encoding completed successfully!')
@@ -250,6 +283,70 @@ const downloadVideo = async (url, outputPath) => {
         writer.on('finish', resolve)
         writer.on('error', reject)
     })
+}
+
+// Download video from Google Drive using OAuth token
+const downloadVideoFromGoogleDrive = async (driveId, token, outputPath) => {
+    console.log(`📥 Downloading from Google Drive: ${driveId}`)
+    
+    try {
+        // Get file metadata first to check size
+        const metadataResponse = await axios.get(
+            `https://www.googleapis.com/drive/v3/files/${driveId}`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${token.access_token}`
+                },
+                params: {
+                    fields: 'size,name,mimeType'
+                },
+                timeout: 30000
+            }
+        )
+        
+        const { size, name, mimeType } = metadataResponse.data
+        console.log(`📊 File info: ${name}, size: ${(size / 1024 / 1024).toFixed(2)}MB, type: ${mimeType}`)
+        
+        // Download file content
+        const downloadResponse = await axios({
+            method: 'GET',
+            url: `https://www.googleapis.com/drive/v3/files/${driveId}?alt=media`,
+            headers: {
+                'Authorization': `Bearer ${token.access_token}`
+            },
+            responseType: 'stream',
+            timeout: 600000 // 10 minutes for large files
+        })
+        
+        const writer = fs.createWriteStream(outputPath)
+        downloadResponse.data.pipe(writer)
+        
+        return new Promise((resolve, reject) => {
+            let downloadedBytes = 0
+            
+            downloadResponse.data.on('data', (chunk) => {
+                downloadedBytes += chunk.length
+                const percent = ((downloadedBytes / size) * 100).toFixed(1)
+                if (downloadedBytes % (5 * 1024 * 1024) === 0) { // Log every 5MB
+                    console.log(`📥 Downloaded: ${percent}% (${(downloadedBytes / 1024 / 1024).toFixed(1)}MB)`)
+                }
+            })
+            
+            writer.on('finish', () => {
+                console.log(`✅ Google Drive download completed: ${(downloadedBytes / 1024 / 1024).toFixed(2)}MB`)
+                resolve()
+            })
+            writer.on('error', reject)
+        })
+        
+    } catch (error) {
+        console.error('❌ Google Drive download failed:', error.message)
+        if (error.response) {
+            console.error('Response status:', error.response.status)
+            console.error('Response data:', error.response.data)
+        }
+        throw new Error(`Failed to download from Google Drive: ${error.message}`)
+    }
 }
 
 const getVideoInfo = async (inputFile) => {
@@ -316,7 +413,7 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
             '-start_number', '0',
             '-hls_segment_filename', path.join(outputDir, 'ts', '%03d.ts'),
             '-f', 'hls',
-            path.join(outputDir, 'index.m3u8')
+            path.join(outputDir, 'master.m3u8')
         ]
         
         console.log('🔧 NVENC Enhanced command: ffmpeg', args.join(' '))
@@ -365,7 +462,7 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
 }
 
 // Upload segments to OSS storage and return download URLs
-const uploadSegmentsToOSS = async (tsDir, tsFiles, ossConfig, useFakeExtensions = true) => {
+const uploadSegmentsToOSS = async (tsDir, tsFiles, ossConfig, useFakeExtensions = true, md5DriveId) => {
     console.log('🔧 Initializing OSS client...')
     
     try {
@@ -396,24 +493,24 @@ const uploadSegmentsToOSS = async (tsDir, tsFiles, ossConfig, useFakeExtensions 
                 remoteFileName = tsFile
             }
             
-            // Create remote path with prefix
-            const remotePath = `${ossConfig.tempPrefix}${remoteFileName}`
+            // Create remote path in md5DriveId folder
+            const remotePath = `${md5DriveId}/${remoteFileName}`
             
             console.log(`📤 Uploading ${i + 1}/${tsFiles.length}: ${tsFile} -> ${remotePath}`)
             
             // Upload file to OSS
             const uploadResult = await client.put(remotePath, localPath, {
                 headers: {
-                    'Content-Type': 'video/mp2t', // MPEG-2 Transport Stream
-                    'Cache-Control': 'public, max-age=3600' // 1 hour cache
+                    'Content-Type': useFakeExtensions ? getContentTypeForFakeExtension(remoteFileName) : 'video/mp2t',
+                    'Cache-Control': 'public, max-age=31536000' // 1 year cache
                 }
             })
             
-            // Create download URL
-            const downloadUrl = `https://${ossConfig.cdnDomain}/${remotePath}`
+            // Create download URL using segments CDN domain
+            const downloadUrl = `https://${ossConfig.cdnDomainSegments || ossConfig.cdnDomain}/${remotePath}`
             
             uploadedSegments.push({
-                filename: remoteFileName,
+                fileName: remoteFileName,
                 url: downloadUrl,
                 size: fs.statSync(localPath).size,
                 uploadTime: new Date().toISOString()
@@ -431,6 +528,101 @@ const uploadSegmentsToOSS = async (tsDir, tsFiles, ossConfig, useFakeExtensions 
     }
 }
 
+// Create and upload M3U8 playlist to OSS
+const createAndUploadM3U8ToOSS = async (segments, originalM3u8Content, ossConfig, md5DriveId, cdnDomains, segmentDuration) => {
+    console.log('📋 Creating M3U8 playlist for OSS upload...')
+    
+    try {
+        const client = new OSS({
+            region: ossConfig.region,
+            accessKeyId: ossConfig.accessKeyId,
+            accessKeySecret: ossConfig.accessKeySecret,
+            bucket: ossConfig.bucket
+        })
+        
+        // Extract target duration from original M3U8 or use default
+        let targetDuration = segmentDuration || 2
+        const targetDurationMatch = originalM3u8Content.match(/#EXT-X-TARGETDURATION:(\d+)/)
+        if (targetDurationMatch) {
+            targetDuration = parseInt(targetDurationMatch[1])
+        }
+        
+        // Extract segment durations from original M3U8
+        const originalDurations = []
+        const lines = originalM3u8Content.split('\n')
+        for (let i = 0; i < lines.length; i++) {
+            if (lines[i].startsWith('#EXTINF:')) {
+                const durationMatch = lines[i].match(/#EXTINF:([0-9.]+),/)
+                if (durationMatch) {
+                    originalDurations.push(durationMatch[1])
+                }
+            }
+        }
+        
+        console.log(`📊 Found ${originalDurations.length} segment durations, target duration: ${targetDuration}`)
+        
+        // Sort segments by filename to ensure correct order
+        segments.sort((a, b) => {
+            const numA = parseInt(a.fileName.split('.')[0], 10)
+            const numB = parseInt(b.fileName.split('.')[0], 10)
+            return numA - numB
+        })
+        
+        // Create M3U8 content
+        let playlistContent = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${targetDuration}\n#EXT-X-MEDIA-SEQUENCE:0\n`
+        
+        // Add segments with correct durations
+        segments.forEach((segment, index) => {
+            const duration = index < originalDurations.length 
+                ? originalDurations[index] 
+                : `${segmentDuration}.000000`
+            
+            playlistContent += `#EXTINF:${duration},\n${segment.url}\n`
+        })
+        
+        playlistContent += '#EXT-X-ENDLIST'
+        
+        console.log(`📝 Created M3U8 with ${segments.length} segments`)
+        
+        // Upload M3U8 to OSS
+        const m3u8Path = `${md5DriveId}.m3u8`
+        const uploadResult = await client.put(m3u8Path, Buffer.from(playlistContent), {
+            headers: {
+                'Content-Type': 'application/vnd.apple.mpegurl',
+                'Cache-Control': 'public, max-age=3600' // 1 hour cache for playlist
+            }
+        })
+        
+        const m3u8Url = `https://${cdnDomains.m3u8 || ossConfig.cdnDomain}/${m3u8Path}`
+        
+        console.log(`✅ M3U8 uploaded to: ${m3u8Url}`)
+        return m3u8Url
+        
+    } catch (error) {
+        console.error('❌ M3U8 upload failed:', error)
+        throw new Error(`Failed to upload M3U8 to OSS: ${error.message}`)
+    }
+}
+
+// Get appropriate content type for fake extensions
+const getContentTypeForFakeExtension = (fileName) => {
+    const ext = path.extname(fileName).toLowerCase()
+    const contentTypes = {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.webp': 'image/webp',
+        '.gif': 'image/gif',
+        '.svg': 'image/svg+xml',
+        '.css': 'text/css',
+        '.js': 'application/javascript',
+        '.html': 'text/html',
+        '.txt': 'text/plain',
+        '.ico': 'image/x-icon'
+    }
+    return contentTypes[ext] || 'application/octet-stream'
+}
+
 // Export the handler for RunPod
 export default handler
 
@@ -440,9 +632,17 @@ if (process.env.NODE_ENV !== 'production') {
     const testEvent = {
         input: {
             action: 'health'
-            // For encoding test:
+            // For NEW Google Drive encoding test:
             // action: 'encode',
-            // videoUrl: 'https://sample-videos.com/zip/10/mp4/SampleVideo_1280x720_1mb.mp4',
+            // driveId: '1BxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxC',
+            // md5DriveId: 'abc123def456', 
+            // googleToken: {
+            //     access_token: 'ya29.xxxxxxxxx',
+            //     refresh_token: 'xxxxxxxxx',
+            //     scope: 'https://www.googleapis.com/auth/drive.readonly',
+            //     token_type: 'Bearer',
+            //     expiry_date: 1234567890123
+            // },
             // quality: 'medium',
             // segments: { duration: 2 },
             // output: {
@@ -450,13 +650,29 @@ if (process.env.NODE_ENV !== 'production') {
             //     fakeExtensions: true
             // },
             // ossConfig: {
-            //     region: 'your-region',
+            //     region: 'oss-ap-southeast-1',
             //     accessKeyId: 'your-access-key',
             //     accessKeySecret: 'your-secret',
-            //     bucket: 'your-bucket',
-            //     cdnDomain: 'your-cdn-domain.com',
-            //     tempPrefix: 'runpod-segments/test/'
+            //     bucket: 'hh3d',
+            //     cdnDomain: 's3.googleapicdn.com',        // For M3U8
+            //     cdnDomainSegments: 'cdn.googleapicdn.com' // For TS segments
+            // },
+            // cdnDomains: {
+            //     m3u8: 's3.googleapicdn.com',
+            //     segments: 'cdn.googleapicdn.com'
             // }
+            
+            // For legacy videoUrl encoding test:
+            // action: 'encode',
+            // videoUrl: 'https://sample-videos.com/zip/10/mp4/SampleVideo_1280x720_1mb.mp4',
+            // md5DriveId: 'test123',
+            // quality: 'medium',
+            // segments: { duration: 2 },
+            // output: {
+            //     uploadToStorage: true,
+            //     fakeExtensions: true
+            // },
+            // ossConfig: { ... }
         }
     }
     
