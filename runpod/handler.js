@@ -160,6 +160,8 @@ const handleVideoEncoding = async (input) => {
     
     try {
         // Step 1: Download video
+        console.log('🔄 STEP 1: Starting video download...')
+        const downloadStartTime = Date.now()
         let fileSize
         if (driveId) {
             console.log('📥 Downloading video from Google Drive ID:', driveId)
@@ -170,15 +172,27 @@ const handleVideoEncoding = async (input) => {
         }
         
         fileSize = fs.statSync(inputFile).size
-        console.log(`✅ Downloaded ${(fileSize / 1024 / 1024).toFixed(2)}MB`)
+        const downloadTime = Date.now() - downloadStartTime
+        console.log(`✅ DOWNLOAD COMPLETED: ${(fileSize / 1024 / 1024).toFixed(2)}MB in ${(downloadTime / 1000).toFixed(2)}s`)
+        console.log(`📊 Download speed: ${((fileSize / 1024 / 1024) / (downloadTime / 1000)).toFixed(2)} MB/s`)
         
         // Step 2: Get video info
+        console.log('🔄 STEP 2: Analyzing video properties...')
         const videoInfo = await getVideoInfo(inputFile)
-        console.log('📊 Video info:', videoInfo)
+        console.log('📊 VIDEO INFO:', {
+            duration: `${videoInfo.duration}s`,
+            size: `${(videoInfo.size / 1024 / 1024).toFixed(2)}MB`,
+            resolution: `${videoInfo.width}x${videoInfo.height}`,
+            fps: videoInfo.fps,
+            bitrate: `${Math.round(videoInfo.bitrate / 1000)}kbps`
+        })
         
         // Step 3: Encode with NVENC
-        console.log('🚀 Starting NVENC encoding...')
+        console.log('� STEP 3: Starting GPU/CPU encoding...')
+        const encodeStartTime = Date.now()
         const encodeResult = await encodeWithNVENC(inputFile, outputDir, quality, segments.duration)
+        const encodeTime = Date.now() - encodeStartTime
+        console.log(`✅ ENCODING COMPLETED: Method=${encodeResult.encodingMethod}, Time=${(encodeTime / 1000).toFixed(2)}s, Speed=${encodeResult.speedup}`)
         
         // Step 4: Process output files
         const m3u8Content = fs.readFileSync(path.join(outputDir, 'master.m3u8'), 'utf8')
@@ -191,7 +205,8 @@ const handleVideoEncoding = async (input) => {
         
         // Check if we should upload to OSS storage
         if (ossConfig && output.uploadToStorage) {
-            console.log('☁️ Uploading segments to OSS storage...')
+            console.log('🔄 STEP 4: Uploading to OSS storage...')
+            const uploadStartTime = Date.now()
             uploadedSegments = await uploadSegmentsToOSS(tsDir, tsFiles, ossConfig, output.fakeExtensions, md5DriveId)
             
             // Step 5: Create and upload M3U8 playlist to OSS
@@ -205,9 +220,13 @@ const handleVideoEncoding = async (input) => {
                 segments.duration
             )
             
+            const uploadTime = Date.now() - uploadStartTime
+            console.log(`✅ UPLOAD COMPLETED: ${uploadedSegments.length} segments + M3U8 in ${(uploadTime / 1000).toFixed(2)}s`)
+            
             // Return format for server download
             segmentsData = uploadedSegments
         } else {
+            console.log('💾 Using local file output (no OSS upload)')
             // Original format (local files only) 
             segmentsData = tsFiles.map(file => ({
                 name: file,
@@ -547,69 +566,131 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
 // Check NVENC availability
 const checkNVENCAvailability = async () => {
     return new Promise((resolve) => {
-        console.log('🔍 Checking NVENC availability...')
+        console.log('🔍 DETAILED NVENC AVAILABILITY CHECK...')
+        
+        // Check environment variables first
+        console.log('🔧 Environment check:')
+        console.log(`   NVIDIA_VISIBLE_DEVICES: ${process.env.NVIDIA_VISIBLE_DEVICES || 'not set'}`)
+        console.log(`   CUDA_VISIBLE_DEVICES: ${process.env.CUDA_VISIBLE_DEVICES || 'not set'}`)
+        console.log(`   NVIDIA_DRIVER_CAPABILITIES: ${process.env.NVIDIA_DRIVER_CAPABILITIES || 'not set'}`)
         
         // Check if nvidia-smi works first
         const nvidiaCheck = spawn('nvidia-smi', ['-L'])
         let hasNvidiaGPU = false
+        let gpuInfo = ''
         
         nvidiaCheck.stdout.on('data', (data) => {
             const output = data.toString()
-            if (output.includes('GPU') && output.includes('GeForce')) {
+            gpuInfo += output
+            console.log('🔧 nvidia-smi output:', output.trim())
+            if (output.includes('GPU')) {
                 hasNvidiaGPU = true
                 console.log('✅ NVIDIA GPU detected:', output.trim())
             }
         })
         
+        nvidiaCheck.stderr.on('data', (data) => {
+            console.log('⚠️ nvidia-smi stderr:', data.toString().trim())
+        })
+        
         nvidiaCheck.on('close', (code) => {
+            console.log(`🔧 nvidia-smi exit code: ${code}`)
             if (!hasNvidiaGPU || code !== 0) {
-                console.log('❌ No NVIDIA GPU detected, using software encoding')
+                console.log('❌ No NVIDIA GPU detected or nvidia-smi failed, using software encoding')
+                console.log(`   GPU detected: ${hasNvidiaGPU}`)
+                console.log(`   Exit code: ${code}`)
                 resolve(false)
                 return
             }
             
-            // Test NVENC encoding capability
-            const testArgs = [
-                '-f', 'lavfi',
-                '-i', 'testsrc=duration=1:size=320x240:rate=1',
-                '-c:v', 'h264_nvenc',
-                '-t', '1',
-                '-f', 'null',
-                '-'
-            ]
+            // Check FFmpeg NVENC encoders
+            console.log('🔧 Checking FFmpeg NVENC encoders...')
+            const encoderCheck = spawn('ffmpeg', ['-encoders'])
+            let encoderOutput = ''
             
-            console.log('🧪 Testing NVENC: ffmpeg', testArgs.join(' '))
-            const testProc = spawn('ffmpeg', testArgs)
-            let testError = false
-            
-            testProc.stderr.on('data', (data) => {
-                const output = data.toString()
-                if (output.includes('nvenc') && (output.includes('error') || output.includes('failed') || output.includes('not found'))) {
-                    testError = true
-                    console.log('❌ NVENC test failed:', output.trim())
-                }
+            encoderCheck.stdout.on('data', (data) => {
+                encoderOutput += data.toString()
             })
             
-            testProc.on('close', (testCode) => {
-                if (testCode === 0 && !testError) {
-                    console.log('✅ NVENC is available and working!')
-                    resolve(true)
-                } else {
-                    console.log('❌ NVENC test failed, using software encoding')
-                    console.log('💡 This may be due to:')
-                    console.log('   - FFmpeg not compiled with NVENC support')
-                    console.log('   - Missing NVIDIA drivers')
-                    console.log('   - GPU not supporting NVENC')
+            encoderCheck.on('close', (encoderCode) => {
+                const nvencEncoders = []
+                if (encoderOutput.includes('h264_nvenc')) nvencEncoders.push('h264_nvenc')
+                if (encoderOutput.includes('hevc_nvenc')) nvencEncoders.push('hevc_nvenc')
+                if (encoderOutput.includes('av1_nvenc')) nvencEncoders.push('av1_nvenc')
+                
+                console.log(`🔧 Available NVENC encoders: ${nvencEncoders.length > 0 ? nvencEncoders.join(', ') : 'NONE'}`)
+                
+                if (nvencEncoders.length === 0) {
+                    console.log('❌ No NVENC encoders found in FFmpeg, using software encoding')
                     resolve(false)
+                    return
                 }
+                
+                // Test NVENC encoding capability
+                const testArgs = [
+                    '-f', 'lavfi',
+                    '-i', 'testsrc=duration=1:size=320x240:rate=1',
+                    '-c:v', 'h264_nvenc',
+                    '-t', '1',
+                    '-f', 'null',
+                    '-'
+                ]
+                
+                console.log('🧪 Testing NVENC encoding: ffmpeg', testArgs.join(' '))
+                const testProc = spawn('ffmpeg', testArgs)
+                let testError = false
+                let testOutput = ''
+                
+                testProc.stderr.on('data', (data) => {
+                    const output = data.toString()
+                    testOutput += output
+                    
+                    // More specific error detection
+                    if (output.includes('Cannot load NVENC') || 
+                        output.includes('NVENC not available') ||
+                        output.includes('No NVENC capable devices') ||
+                        output.includes('InitializeEncoder failed')) {
+                        testError = true
+                        console.log('❌ NVENC initialization failed:', output.trim())
+                    }
+                    
+                    // But if we see successful NVENC messages, it's working
+                    if (output.includes('NVENC encoder initialized') || 
+                        output.includes('Using NVENC')) {
+                        console.log('✅ NVENC encoder initialized successfully')
+                    }
+                })
+                
+                testProc.on('close', (testCode) => {
+                    console.log(`🔧 NVENC test exit code: ${testCode}`)
+                    if (testCode === 0 && !testError) {
+                        console.log('✅ NVENC is available and working!')
+                        console.log('🚀 GPU acceleration will be used for encoding')
+                        resolve(true)
+                    } else {
+                        console.log('❌ NVENC test failed, using software encoding')
+                        console.log(`   Exit code: ${testCode}`)
+                        console.log(`   Error detected: ${testError}`)
+                        console.log('💡 This may be due to:')
+                        console.log('   - FFmpeg not compiled with NVENC support')
+                        console.log('   - Missing NVIDIA drivers or runtime')
+                        console.log('   - GPU not supporting NVENC')
+                        console.log('   - CUDA context initialization failed')
+                        if (testOutput) {
+                            console.log('🔧 Test output (last 500 chars):')
+                            console.log(testOutput.slice(-500))
+                        }
+                        resolve(false)
+                    }
+                })
+                
+                // Timeout test after 10 seconds
+                setTimeout(() => {
+                    testProc.kill()
+                    console.log('⏰ NVENC test timeout, using software encoding')
+                    resolve(false)
+                }, 10000)
             })
-            
-            // Timeout test after 10 seconds
-            setTimeout(() => {
-                testProc.kill()
-                console.log('⏰ NVENC test timeout, using software encoding')
-                resolve(false)
-            }, 10000)
         })
         
         // Timeout nvidia-smi check
@@ -624,6 +705,8 @@ const checkNVENCAvailability = async () => {
 // Upload segments to OSS storage and return download URLs
 const uploadSegmentsToOSS = async (tsDir, tsFiles, ossConfig, useFakeExtensions = true, md5DriveId) => {
     console.log('🔧 Initializing OSS client...')
+    console.log(`📊 OSS Config: region=${ossConfig.region}, bucket=${ossConfig.bucket}`)
+    console.log(`📊 Upload settings: fakeExtensions=${useFakeExtensions}, folder=${md5DriveId}`)
     
     try {
         const client = new OSS({
@@ -635,9 +718,16 @@ const uploadSegmentsToOSS = async (tsDir, tsFiles, ossConfig, useFakeExtensions 
         
         console.log(`✅ OSS client initialized for bucket: ${ossConfig.bucket}`)
         
+        // Calculate total upload size
+        const totalSize = tsFiles.reduce((sum, file) => {
+            return sum + fs.statSync(path.join(tsDir, file)).size
+        }, 0)
+        console.log(`📊 Total upload size: ${(totalSize / 1024 / 1024).toFixed(2)}MB across ${tsFiles.length} segments`)
+        
         // Define fake extensions for CDN bypass
         const fakeExtensions = ['.png', '.jpg', '.webp', '.css', '.js', '.ico', '.svg', '.gif', '.txt', '.html']
         const uploadedSegments = []
+        let uploadedBytes = 0
         
         for (let i = 0; i < tsFiles.length; i++) {
             const tsFile = tsFiles[i]
@@ -656,7 +746,10 @@ const uploadSegmentsToOSS = async (tsDir, tsFiles, ossConfig, useFakeExtensions 
             // Create remote path in md5DriveId folder
             const remotePath = `${md5DriveId}/${remoteFileName}`
             
-            console.log(`📤 Uploading ${i + 1}/${tsFiles.length}: ${tsFile} -> ${remotePath}`)
+            const fileSize = fs.statSync(localPath).size
+            const startTime = Date.now()
+            
+            console.log(`📤 Uploading ${i + 1}/${tsFiles.length}: ${tsFile} (${(fileSize / 1024).toFixed(1)}KB) -> ${remotePath}`)
             
             // Upload file to OSS
             const uploadResult = await client.put(remotePath, localPath, {
@@ -666,17 +759,21 @@ const uploadSegmentsToOSS = async (tsDir, tsFiles, ossConfig, useFakeExtensions 
                 }
             })
             
+            const uploadTime = Date.now() - startTime
+            uploadedBytes += fileSize
+            const progress = ((uploadedBytes / totalSize) * 100).toFixed(1)
+            
             // Create download URL using segments CDN domain
             const downloadUrl = `https://${ossConfig.cdnDomainSegments || ossConfig.cdnDomain}/${remotePath}`
             
             uploadedSegments.push({
                 fileName: remoteFileName,
                 url: downloadUrl,
-                size: fs.statSync(localPath).size,
+                size: fileSize,
                 uploadTime: new Date().toISOString()
             })
             
-            console.log(`✅ Uploaded: ${downloadUrl}`)
+            console.log(`✅ Uploaded: ${downloadUrl} (${uploadTime}ms, ${progress}% total)`)
         }
         
         console.log(`🎉 Successfully uploaded ${uploadedSegments.length} segments to OSS`)
