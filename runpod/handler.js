@@ -449,7 +449,7 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
         }
         
         const settings = qualitySettings[quality] || qualitySettings.medium
-        const gopSize = Math.round(30 * segmentTime) // GOP size based on segment duration
+        const gopSize = Math.round(25 * segmentTime) // GOP size optimized for 25fps (50 for 2s segments)
         
         let args
         if (useNVENC) {
@@ -460,18 +460,20 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
                 '-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda',
                 '-i', inputFile,
 
-                // CORRECTED HYBRID GPU⇄CPU PIPELINE - fixed hwdownload format
+                // FIXED HYBRID GPU⇄CPU PIPELINE - stable format chain with explicit pixel format
+                '-color_range', 'tv', '-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709',
                 '-vf', [
                     'scale_npp=trunc(iw/2)*2:trunc(ih/2)*2:interp_algo=lanczos',
                     'hwdownload,format=nv12',
                     'format=yuv420p',
                     'eq=contrast=1.15:saturation=1.28:brightness=0.05:gamma=0.95',
                     'unsharp=3:3:0.8:3:3:0.5',
-                    'format=nv12,hwupload=extra_hw_frames=64'
+                    'format=nv12,hwupload_cuda=extra_hw_frames=64'
                 ].join(','),
 
-                // ENCODE NVENC - no pix_fmt needed for hw frames
+                // ENCODE NVENC - explicit pix_fmt to prevent auto_scale injection
                 '-c:v', 'h264_nvenc',
+                '-pix_fmt', 'nv12',           // CRITICAL: explicit pixel format for NVENC
                 '-preset', 'p1',              // p1 nhanh nhất
                 '-rc', 'vbr', '-cq', '23',
                 '-b:v', '2500k', '-maxrate', '4000k', '-bufsize', '5000k',
