@@ -4,20 +4,26 @@ RUN apt-get update && apt-get install -y \
     curl ca-certificates python3-pip \
  && rm -rf /var/lib/apt/lists/*
 
-# NVIDIA/CUDA env với full permissions
+# NVIDIA/CUDA env - fix CUDA_ERROR_NO_DEVICE issue
 ENV NVIDIA_VISIBLE_DEVICES=all
-ENV NVIDIA_DRIVER_CAPABILITIES=all
-ENV CUDA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+ENV CUDA_VISIBLE_DEVICES=0
 ENV CUDA_DEVICE_ORDER=PCI_BUS_ID
 ENV NVIDIA_REQUIRE_CUDA=cuda>=11.0
 
-# CUDA runtime environment setup
-ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/local/cuda/lib64:/opt/ffmpeg/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
+# Fix CUDA device enumeration
+ENV CUDA_DEVICE_ORDER=PCI_BUS_ID
+ENV CUDA_CACHE_DISABLE=1
 
-# Configure ldconfig for CUDA libraries
+# CUDA runtime environment setup - fix library paths
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/local/cuda/lib64:/opt/ffmpeg/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
+ENV NVIDIA_DRIVER_PATH=/usr/local/nvidia/lib64
+
+# Configure ldconfig for CUDA libraries + NVIDIA runtime libs
 RUN echo "/usr/local/nvidia/lib64" > /etc/ld.so.conf.d/nvidia.conf \
  && echo "/usr/local/cuda/lib64"  > /etc/ld.so.conf.d/cuda.conf \
  && echo "/opt/ffmpeg/lib"        > /etc/ld.so.conf.d/ffmpeg.conf \
+ && echo "/usr/lib/x86_64-linux-gnu" > /etc/ld.so.conf.d/system.conf \
  && ldconfig
 
 # Create device access wrapper với proper permissions
@@ -54,45 +60,68 @@ RUN npm install --production --no-audit --no-fund
 COPY handler.js runpod_wrapper.py ./
 RUN mkdir -p /tmp/encoding
 
-# Create startup script with proper syntax
+# Create startup script with proper CUDA initialization
 RUN echo '#!/bin/bash' > /app/startup.sh \
  && echo 'set -e' >> /app/startup.sh \
  && echo 'echo "🔍 RunPod NVENC Initialization"' >> /app/startup.sh \
  && echo 'echo "============================="' >> /app/startup.sh \
- && echo '# Force device permissions' >> /app/startup.sh \
- && echo 'if [[ -c /dev/nvidia0 ]]; then' >> /app/startup.sh \
- && echo '    echo "📱 Setting GPU device permissions..."' >> /app/startup.sh \
- && echo '    chmod 666 /dev/nvidia* 2>/dev/null || true' >> /app/startup.sh \
- && echo '    chmod 666 /dev/nvidiactl 2>/dev/null || true' >> /app/startup.sh \
- && echo 'fi' >> /app/startup.sh \
+ && echo '# Check GPU devices' >> /app/startup.sh \
  && echo 'echo "🔧 Environment:"' >> /app/startup.sh \
  && echo 'echo "  CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-unset}"' >> /app/startup.sh \
  && echo 'echo "  NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-unset}"' >> /app/startup.sh \
- && echo 'ls -la /dev/nvidia* 2>/dev/null || echo "  No devices"' >> /app/startup.sh \
- && echo 'nvidia-smi -L 2>/dev/null || echo "  nvidia-smi failed"' >> /app/startup.sh \
- && echo 'echo "🔧 CUDA Context Pre-initialization:"' >> /app/startup.sh \
+ && echo 'echo "  NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-unset}"' >> /app/startup.sh \
+ && echo 'ls -la /dev/nvidia* 2>/dev/null || echo "  No /dev/nvidia* devices found"' >> /app/startup.sh \
+ && echo 'echo "� NVIDIA-SMI check:"' >> /app/startup.sh \
+ && echo 'if nvidia-smi -L 2>/dev/null; then' >> /app/startup.sh \
+ && echo '    echo "✅ nvidia-smi working"' >> /app/startup.sh \
+ && echo '    nvidia-smi --query-gpu=uuid,name --format=csv,noheader 2>/dev/null || true' >> /app/startup.sh \
+ && echo 'else' >> /app/startup.sh \
+ && echo '    echo "❌ nvidia-smi failed"' >> /app/startup.sh \
+ && echo 'fi' >> /app/startup.sh \
+ && echo 'echo "🔧 CUDA Device Enumeration + Fix:"' >> /app/startup.sh \
+ && echo '# Fix CUDA device visibility' >> /app/startup.sh \
+ && echo 'export CUDA_VISIBLE_DEVICES=0' >> /app/startup.sh \
+ && echo 'export NVIDIA_VISIBLE_DEVICES=0' >> /app/startup.sh \
  && echo 'python3 -c "' >> /app/startup.sh \
- && echo 'import ctypes' >> /app/startup.sh \
+ && echo 'import ctypes, os' >> /app/startup.sh \
+ && echo 'print(f\"Process PID: {os.getpid()}\")' >> /app/startup.sh \
+ && echo 'print(f\"CUDA_VISIBLE_DEVICES: {os.environ.get(\"CUDA_VISIBLE_DEVICES\", \"unset\")}\")' >> /app/startup.sh \
+ && echo 'print(f\"NVIDIA_VISIBLE_DEVICES: {os.environ.get(\"NVIDIA_VISIBLE_DEVICES\", \"unset\")}\")' >> /app/startup.sh \
  && echo 'try:' >> /app/startup.sh \
+ && echo '    import os' >> /app/startup.sh \
+ && echo '    # Force device 0 visibility' >> /app/startup.sh \
+ && echo '    os.environ[\"CUDA_VISIBLE_DEVICES\"] = \"0\"' >> /app/startup.sh \
  && echo '    cuda = ctypes.CDLL(\"libcuda.so.1\")' >> /app/startup.sh \
  && echo '    result = cuda.cuInit(0)' >> /app/startup.sh \
- && echo '    print(f\"CUDA pre-init result: {result}\")' >> /app/startup.sh \
+ && echo '    print(f\"cuInit(0) result: {result} (0=success)\")' >> /app/startup.sh \
  && echo '    if result == 0:' >> /app/startup.sh \
- && echo '        device = ctypes.c_int(0)' >> /app/startup.sh \
- && echo '        cuda.cuDeviceGet(ctypes.byref(device), 0)' >> /app/startup.sh \
- && echo '        print(\"CUDA context pre-initialized successfully\")' >> /app/startup.sh \
+ && echo '        device_count = ctypes.c_int(0)' >> /app/startup.sh \
+ && echo '        cuda.cuDeviceGetCount(ctypes.byref(device_count))' >> /app/startup.sh \
+ && echo '        print(f\"CUDA device count: {device_count.value}\")' >> /app/startup.sh \
+ && echo '        for i in range(device_count.value):' >> /app/startup.sh \
+ && echo '            device = ctypes.c_int(0)' >> /app/startup.sh \
+ && echo '            cuda.cuDeviceGet(ctypes.byref(device), i)' >> /app/startup.sh \
+ && echo '            print(f\"  Device {i}: ID {device.value}\")' >> /app/startup.sh \
+ && echo '        print(\"✅ CUDA initialization successful!\")' >> /app/startup.sh \
  && echo '    else:' >> /app/startup.sh \
- && echo '        print(f\"CUDA init failed: {result}\")' >> /app/startup.sh \
+ && echo '        print(f\"❌ CUDA init failed: {result}\")' >> /app/startup.sh \
  && echo 'except Exception as e:' >> /app/startup.sh \
- && echo '    print(f\"CUDA pre-init error: {e}\")' >> /app/startup.sh \
+ && echo '    print(f\"❌ CUDA enumeration error: {e}\")' >> /app/startup.sh \
  && echo '"' >> /app/startup.sh \
- && echo 'echo "🧪 NVENC Test (after CUDA pre-init):"' >> /app/startup.sh \
- && echo 'if timeout 3 ffmpeg -hide_banner -f lavfi -i testsrc=duration=0.1:size=64x64 -c:v h264_nvenc -preset ultrafast -f null - 2>/dev/null; then' >> /app/startup.sh \
- && echo '    echo "✅ NVENC working!"' >> /app/startup.sh \
- && echo '    export NVENC_AVAILABLE=true' >> /app/startup.sh \
+ && echo 'echo "🧪 NVENC Direct Test (with CUDA device fix):"' >> /app/startup.sh \
+ && echo '# Ensure device 0 is visible for FFmpeg NVENC test' >> /app/startup.sh \
+ && echo 'export CUDA_VISIBLE_DEVICES=0' >> /app/startup.sh \
+ && echo 'export NVIDIA_VISIBLE_DEVICES=0' >> /app/startup.sh \
+ && echo 'if timeout 10 ffmpeg -hide_banner -hwaccel cuda -hwaccel_device 0 -f lavfi -i testsrc=duration=0.1:size=64x64:rate=1 -c:v h264_nvenc -preset p1 -f null - 2>&1; then' >> /app/startup.sh \
+ && echo '    echo "✅ NVENC working with CUDA hwaccel!"' >> /app/startup.sh \
  && echo 'else' >> /app/startup.sh \
- && echo '    echo "⚠️ NVENC still failed - will use CPU fallback"' >> /app/startup.sh \
- && echo '    export NVENC_AVAILABLE=false' >> /app/startup.sh \
+ && echo '    echo "⚠️ NVENC with hwaccel failed, trying direct approach..."' >> /app/startup.sh \
+ && echo '    if timeout 10 ffmpeg -hide_banner -f lavfi -i testsrc=duration=0.1:size=64x64:rate=1 -c:v h264_nvenc -preset p1 -gpu 0 -f null - 2>&1; then' >> /app/startup.sh \
+ && echo '        echo "✅ NVENC working with direct GPU selection!"' >> /app/startup.sh \
+ && echo '    else' >> /app/startup.sh \
+ && echo '        echo "❌ NVENC still failed - will use CPU fallback"' >> /app/startup.sh \
+ && echo '        timeout 5 ffmpeg -hide_banner -f lavfi -i testsrc=duration=0.1:size=64x64:rate=1 -c:v h264_nvenc -preset p1 -f null - 2>&1 | head -10 || true' >> /app/startup.sh \
+ && echo '    fi' >> /app/startup.sh \
  && echo 'fi' >> /app/startup.sh \
  && echo 'echo "🚀 Starting handler..."' >> /app/startup.sh \
  && echo 'exec python3 runpod_wrapper.py' >> /app/startup.sh \
