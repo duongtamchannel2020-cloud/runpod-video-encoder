@@ -23,7 +23,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
 RUN pip3 install --no-cache-dir runpod
 
 # Verify FFmpeg NVENC support during build
-RUN echo "🔧 Verifying FFmpeg NVENC compatibility..." \
+RUN echo "� Verifying FFmpeg NVENC compatibility..." \
     && ffmpeg -version | head -3 \
     && echo "🔍 Available NVENC encoders:" \
     && (ffmpeg -encoders 2>/dev/null | grep nvenc || echo "⚠️ NVENC check will be done at runtime") \
@@ -48,5 +48,6 @@ ENV NODE_ENV=production
 # Runtime verification and startup
 RUN echo "✅ Container build complete with NVENC-compatible FFmpeg"
 
-# Start the RunPod handler directly
+# Override the FFmpeg ENTRYPOINT and set our own
+ENTRYPOINT []
 CMD ["python3", "runpod_wrapper.py"]
