@@ -24,9 +24,11 @@ const handler = async (event) => {
                 return await handleHealthCheck()
             case 'encode':
                 return await handleVideoEncoding(input)
+            case 'nvenc-debug':
+                return await handleNVENCDebug()
             default:
                 return {
-                    error: `Unknown action: ${input.action}. Supported actions: health, encode`
+                    error: `Unknown action: ${input.action}. Supported actions: health, encode, nvenc-debug`
                 }
         }
     } catch (error) {
@@ -35,6 +37,34 @@ const handler = async (event) => {
             error: error.message,
             stack: error.stack
         }
+    }
+}
+
+// NVENC debug handler
+const handleNVENCDebug = async () => {
+    console.log('🔧 Starting NVENC Debug Session...')
+    
+    const debugInfo = {
+        timestamp: new Date().toISOString(),
+        platform: process.platform,
+        arch: process.arch,
+        node_version: process.version
+    }
+    
+    try {
+        // Test NVENC availability with detailed logging
+        const nvencAvailable = await checkNVENCAvailability()
+        debugInfo.nvenc_available = nvencAvailable
+        debugInfo.nvenc_test_completed = true
+        
+        console.log(`🔧 NVENC Debug Result: ${nvencAvailable ? 'AVAILABLE' : 'NOT AVAILABLE'}`)
+        return debugInfo
+        
+    } catch (error) {
+        debugInfo.nvenc_test_completed = false
+        debugInfo.nvenc_error = error.message
+        console.error('❌ NVENC Debug failed:', error)
+        return debugInfo
     }
 }
 
@@ -566,15 +596,18 @@ const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
 // Check NVENC availability
 const checkNVENCAvailability = async () => {
     return new Promise((resolve) => {
-        console.log('🔍 DETAILED NVENC AVAILABILITY CHECK...')
+        console.log('🔍 ===== DETAILED NVENC AVAILABILITY CHECK =====')
         
         // Check environment variables first
         console.log('🔧 Environment check:')
         console.log(`   NVIDIA_VISIBLE_DEVICES: ${process.env.NVIDIA_VISIBLE_DEVICES || 'not set'}`)
         console.log(`   CUDA_VISIBLE_DEVICES: ${process.env.CUDA_VISIBLE_DEVICES || 'not set'}`)
         console.log(`   NVIDIA_DRIVER_CAPABILITIES: ${process.env.NVIDIA_DRIVER_CAPABILITIES || 'not set'}`)
+        console.log(`   PATH: ${process.env.PATH}`)
+        console.log(`   LD_LIBRARY_PATH: ${process.env.LD_LIBRARY_PATH || 'not set'}`)
         
-        // Check if nvidia-smi works first
+        // First, check if nvidia-smi exists and is accessible
+        console.log('🔧 Step 1: Checking nvidia-smi accessibility...')
         const nvidiaCheck = spawn('nvidia-smi', ['-L'])
         let hasNvidiaGPU = false
         let gpuInfo = ''
@@ -604,15 +637,26 @@ const checkNVENCAvailability = async () => {
             }
             
             // Check FFmpeg NVENC encoders
-            console.log('🔧 Checking FFmpeg NVENC encoders...')
+            console.log('🔧 Step 2: Checking FFmpeg NVENC encoders...')
             const encoderCheck = spawn('ffmpeg', ['-encoders'])
             let encoderOutput = ''
+            let encoderError = ''
             
             encoderCheck.stdout.on('data', (data) => {
                 encoderOutput += data.toString()
             })
             
+            encoderCheck.stderr.on('data', (data) => {
+                encoderError += data.toString()
+            })
+            
             encoderCheck.on('close', (encoderCode) => {
+                console.log(`🔧 FFmpeg encoders command exit code: ${encoderCode}`)
+                if (encoderError) {
+                    console.log('🔧 FFmpeg encoders stderr:', encoderError.slice(0, 500))
+                }
+                
+                // Look for NVENC encoders
                 const nvencEncoders = []
                 if (encoderOutput.includes('h264_nvenc')) nvencEncoders.push('h264_nvenc')
                 if (encoderOutput.includes('hevc_nvenc')) nvencEncoders.push('hevc_nvenc')
@@ -620,11 +664,29 @@ const checkNVENCAvailability = async () => {
                 
                 console.log(`🔧 Available NVENC encoders: ${nvencEncoders.length > 0 ? nvencEncoders.join(', ') : 'NONE'}`)
                 
+                // Show a sample of encoder output for debugging
+                const nvencLines = encoderOutput.split('\n').filter(line => line.includes('nvenc'))
+                if (nvencLines.length > 0) {
+                    console.log('🔧 NVENC encoder lines found:')
+                    nvencLines.forEach(line => console.log(`   ${line.trim()}`))
+                } else {
+                    console.log('🔧 No NVENC lines found in encoder output')
+                    console.log('🔧 First 10 lines of encoder output:')
+                    encoderOutput.split('\n').slice(0, 10).forEach((line, i) => {
+                        console.log(`   ${i+1}: ${line.trim()}`)
+                    })
+                }
+                
                 if (nvencEncoders.length === 0) {
                     console.log('❌ No NVENC encoders found in FFmpeg, using software encoding')
+                    console.log('💡 This could mean:')
+                    console.log('   - FFmpeg was not compiled with NVENC support')
+                    console.log('   - NVIDIA libraries are not properly linked')
                     resolve(false)
                     return
                 }
+                
+                console.log('🔧 Step 3: Testing NVENC encoding capability...')
                 
                 // Test NVENC encoding capability
                 const testArgs = [
@@ -636,50 +698,73 @@ const checkNVENCAvailability = async () => {
                     '-'
                 ]
                 
-                console.log('🧪 Testing NVENC encoding: ffmpeg', testArgs.join(' '))
+                console.log('🧪 Testing NVENC with command: ffmpeg', testArgs.join(' '))
                 const testProc = spawn('ffmpeg', testArgs)
                 let testError = false
                 let testOutput = ''
+                let testStderr = ''
                 
                 testProc.stderr.on('data', (data) => {
                     const output = data.toString()
                     testOutput += output
+                    testStderr += output
+                    
+                    // Log all NVENC-related messages for debugging
+                    if (output.toLowerCase().includes('nvenc')) {
+                        console.log('🔧 NVENC message:', output.trim())
+                    }
                     
                     // More specific error detection
                     if (output.includes('Cannot load NVENC') || 
                         output.includes('NVENC not available') ||
                         output.includes('No NVENC capable devices') ||
-                        output.includes('InitializeEncoder failed')) {
+                        output.includes('InitializeEncoder failed') ||
+                        output.includes('Failed to load NVENC') ||
+                        output.includes('NVENC encoder open failed')) {
                         testError = true
                         console.log('❌ NVENC initialization failed:', output.trim())
                     }
                     
                     // But if we see successful NVENC messages, it's working
                     if (output.includes('NVENC encoder initialized') || 
-                        output.includes('Using NVENC')) {
+                        output.includes('Using NVENC') ||
+                        output.includes('NVENC init successful')) {
                         console.log('✅ NVENC encoder initialized successfully')
+                    }
+                    
+                    // Log CUDA-related errors
+                    if (output.toLowerCase().includes('cuda')) {
+                        console.log('🔧 CUDA message:', output.trim())
                     }
                 })
                 
                 testProc.on('close', (testCode) => {
-                    console.log(`🔧 NVENC test exit code: ${testCode}`)
+                    console.log(`🔧 NVENC test completed with exit code: ${testCode}`)
+                    console.log(`🔧 Test error flag: ${testError}`)
+                    
                     if (testCode === 0 && !testError) {
                         console.log('✅ NVENC is available and working!')
                         console.log('🚀 GPU acceleration will be used for encoding')
                         resolve(true)
                     } else {
-                        console.log('❌ NVENC test failed, using software encoding')
+                        console.log('❌ NVENC test failed, falling back to software encoding')
                         console.log(`   Exit code: ${testCode}`)
                         console.log(`   Error detected: ${testError}`)
-                        console.log('💡 This may be due to:')
+                        
+                        console.log('💡 Potential causes:')
                         console.log('   - FFmpeg not compiled with NVENC support')
-                        console.log('   - Missing NVIDIA drivers or runtime')
-                        console.log('   - GPU not supporting NVENC')
+                        console.log('   - Missing NVIDIA drivers (libnvidia-encode)')
+                        console.log('   - GPU not supporting NVENC (GTX 600+/RTX series)')
                         console.log('   - CUDA context initialization failed')
-                        if (testOutput) {
-                            console.log('🔧 Test output (last 500 chars):')
-                            console.log(testOutput.slice(-500))
+                        console.log('   - Docker container missing NVIDIA runtime')
+                        
+                        if (testStderr) {
+                            console.log('🔧 Full stderr output for analysis:')
+                            console.log('--- STDERR START ---')
+                            console.log(testStderr)
+                            console.log('--- STDERR END ---')
                         }
+                        
                         resolve(false)
                     }
                 })
@@ -883,12 +968,17 @@ const getContentTypeForFakeExtension = (fileName) => {
 // Export the handler for RunPod
 export default handler
 
-// For local testing
+// For local testing and NVENC debugging
 if (process.env.NODE_ENV !== 'production') {
-    // Test locally
+    // Test locally with NVENC debug
     const testEvent = {
         input: {
-            action: 'health'
+            // Debug NVENC availability only
+            action: 'nvenc-debug'
+            
+            // Health check
+            // action: 'health'
+            
             // For NEW Google Drive encoding test:
             // action: 'encode',
             // driveId: '1BxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxC',
@@ -926,10 +1016,9 @@ if (process.env.NODE_ENV !== 'production') {
             // quality: 'medium',
             // segments: { duration: 2 },
             // output: {
-            //     uploadToStorage: true,
-            //     fakeExtensions: true
-            // },
-            // ossConfig: { ... }
+            //     uploadToStorage: false,
+            //     fakeExtensions: false
+            // }
         }
     }
     
