@@ -243,7 +243,7 @@ const handleVideoEncoding = async (input) => {
         if (uploadedSegments.length > 0) {
             result.segments = uploadedSegments
             result.totalSegments = uploadedSegments.length
-            result.m3u8Url = result.m3u8Url || `https://${cdnDomains.m3u8 || ossConfig.cdnDomain}/${md5DriveId}.m3u8`
+            result.m3u8Url = result.m3u8Url || `https://${cdnDomains.m3u8 || ossConfig.cdnDomain}/${md5DriveId}/master.m3u8`
             result.uploadedToStorage = true
             console.log(`✅ Uploaded ${uploadedSegments.length} segments + M3U8 to OSS`)
         }
@@ -370,94 +370,254 @@ const getVideoInfo = async (inputFile) => {
 }
 
 const encodeWithNVENC = async (inputFile, outputDir, quality, segmentTime) => {
+    // Check if NVENC is available first
+    const useNVENC = await checkNVENCAvailability()
+    
     return new Promise((resolve, reject) => {
         const qualitySettings = {
-            high: { crf: 18, preset: 'slow' },
-            medium: { crf: 23, preset: 'medium' },
-            low: { crf: 28, preset: 'fast' }
+            high: { qp: 20, preset: 'p4' },
+            medium: { qp: 25, preset: 'p4' },
+            low: { qp: 30, preset: 'p6' }
         }
         
         const settings = qualitySettings[quality] || qualitySettings.medium
         const gopSize = Math.round(30 * segmentTime) // GOP size based on segment duration
         
-        const args = [
-            '-i', inputFile,
-            
-            // NVENC Pipeline encode tăng cường cho anime 3D - rực rỡ, nét căng, chi tiết cao
-            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2:out_range=full:flags=lanczos,eq=contrast=1.15:saturation=1.28:brightness=0.05:gamma=0.95,unsharp=5:5:1.2:5:5:0.8,format=yuv420p',
-            
-            // Encode H.264 bằng NVENC GPU
-            '-c:v', 'h264_nvenc',
-            '-preset', settings.preset,
-            '-cq', settings.crf.toString(),
-            '-profile:v', 'high',
-            '-level', '4.1',
-            '-bf', '2', // B-frames for better compression
-            
-            // GOP theo segment: keyframe ổn định cho HLS
-            '-g', gopSize.toString(),
-            '-keyint_min', gopSize.toString(),
-            '-force_key_frames', `expr:gte(t,n_forced*${segmentTime})`,
-            
-            // Audio encoding - AAC-LC optimized
-            '-c:a', 'aac',
-            '-b:a', '128k',
-            '-ac', '2',      // Stereo
-            '-ar', '48000',  // 48 kHz sample rate
-            
-            // HLS specific settings
-            '-hls_time', segmentTime.toString(),
-            '-hls_playlist_type', 'vod',
-            '-hls_flags', 'independent_segments',  // Each segment can be decoded independently
-            '-hls_list_size', '0',                 // Include all segments in playlist
-            '-start_number', '0',
-            '-hls_segment_filename', path.join(outputDir, 'ts', '%03d.ts'),
-            '-f', 'hls',
-            path.join(outputDir, 'master.m3u8')
-        ]
+        let args
+        if (useNVENC) {
+            console.log('🚀 Using NVIDIA NVENC GPU encoding')
+            args = [
+                '-y',
+                '-hwaccel', 'cuda',
+                '-hwaccel_output_format', 'cuda',
+                '-i', inputFile,
+                
+                // NVENC Pipeline with GPU filters
+                '-vf', 'scale_cuda=trunc(iw/2)*2:trunc(ih/2)*2,hwdownload,format=yuv420p,eq=contrast=1.15:saturation=1.28:brightness=0.05:gamma=0.95,unsharp=5:5:1.2:5:5:0.8',
+                
+                // NVENC H.264 encoding
+                '-c:v', 'h264_nvenc',
+                '-preset', settings.preset,
+                '-rc', 'constqp',
+                '-qp', settings.qp.toString(),
+                '-profile:v', 'high',
+                '-level', '4.1',
+                '-bf', '2',
+                '-spatial_aq', '1',
+                '-temporal_aq', '1',
+                
+                // GOP settings
+                '-g', gopSize.toString(),
+                '-keyint_min', gopSize.toString(),
+                '-force_key_frames', `expr:gte(t,n_forced*${segmentTime})`,
+                
+                // Audio
+                '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '48000',
+                
+                // HLS
+                '-hls_time', segmentTime.toString(),
+                '-hls_playlist_type', 'vod',
+                '-hls_flags', 'independent_segments',
+                '-hls_list_size', '0',
+                '-start_number', '0',
+                '-hls_segment_filename', path.join(outputDir, 'ts', '%03d.ts'),
+                '-f', 'hls',
+                path.join(outputDir, 'master.m3u8')
+            ]
+            console.log('🎨 GPU Enhancement: CUDA + NVENC + Contrast+1.15 + Saturation+1.28')
+        } else {
+            console.log('⚠️ NVENC not available, using software encoding')
+            args = [
+                '-y',
+                '-i', inputFile,
+                
+                // Software encoding with CPU filters
+                '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2:out_range=full:flags=lanczos,eq=contrast=1.15:saturation=1.28:brightness=0.05:gamma=0.95,unsharp=5:5:1.2:5:5:0.8',
+                
+                // x264 software encoding
+                '-c:v', 'libx264',
+                '-preset', 'fast', // Faster for CPU
+                '-crf', '23',
+                '-profile:v', 'high',
+                '-level', '4.1',
+                '-bf', '2',
+                
+                // GOP settings
+                '-g', gopSize.toString(),
+                '-keyint_min', gopSize.toString(),
+                '-sc_threshold', '0',
+                '-force_key_frames', `expr:gte(t,n_forced*${segmentTime})`,
+                
+                // Audio
+                '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '48000',
+                
+                // HLS
+                '-hls_time', segmentTime.toString(),
+                '-hls_playlist_type', 'vod',
+                '-hls_flags', 'independent_segments',
+                '-hls_list_size', '0',
+                '-start_number', '0',
+                '-hls_segment_filename', path.join(outputDir, 'ts', '%03d.ts'),
+                '-f', 'hls',
+                path.join(outputDir, 'master.m3u8')
+            ]
+            console.log('🎨 CPU Enhancement: x264 + Contrast+1.15 + Saturation+1.28')
+        }
         
-        console.log('🔧 NVENC Enhanced command: ffmpeg', args.join(' '))
-        console.log('🎨 Video Enhancement: Contrast+1.15, Saturation+1.28, Sharpening, Full Range')
+        console.log('🔧 FFmpeg command: ffmpeg', args.join(' '))
         
         const startTime = Date.now()
         const proc = spawn('ffmpeg', args)
         let logs = ''
+        let lastProgressTime = 0
         
         proc.stderr.on('data', (data) => {
-            logs += data.toString()
-            // Log progress
-            if (data.toString().includes('time=')) {
-                const match = data.toString().match(/time=(\d+:\d+:\d+\.\d+)/)
-                if (match) {
-                    console.log(`⏱️ Progress: ${match[1]}`)
+            const output = data.toString()
+            logs += output
+            
+            // Enhanced progress logging
+            if (output.includes('time=')) {
+                const timeMatch = output.match(/time=(\d+:\d+:\d+\.\d+)/)
+                const speedMatch = output.match(/speed=\s*([0-9.]+)x/)
+                const fpsMatch = output.match(/fps=\s*([0-9.]+)/)
+                
+                if (timeMatch) {
+                    const currentTime = Date.now()
+                    if (currentTime - lastProgressTime > 5000) { // Log every 5 seconds
+                        lastProgressTime = currentTime
+                        const progress = `⏱️ Progress: ${timeMatch[1]}`
+                        const speed = speedMatch ? ` | Speed: ${speedMatch[1]}x` : ''
+                        const fps = fpsMatch ? ` | FPS: ${fpsMatch[1]}` : ''
+                        console.log(progress + speed + fps)
+                    }
                 }
+            }
+            
+            // Log encoding method info
+            if (output.includes('h264_nvenc') || output.includes('nvenc')) {
+                console.log('🚀 NVENC GPU encoding active')
+            }
+            if (output.includes('libx264')) {
+                console.log('💻 Software x264 encoding active')
+            }
+            
+            // Log any warnings or errors
+            if (output.includes('deprecated') || output.includes('warning')) {
+                console.warn('⚠️ Warning:', output.trim())
             }
         })
         
         proc.on('close', (code) => {
             const processingTime = Date.now() - startTime
+            const processingSeconds = processingTime / 1000
             
             if (code === 0) {
                 const tsFiles = fs.readdirSync(path.join(outputDir, 'ts')).filter(f => f.endsWith('.ts'))
-                console.log(`✅ NVENC encoding completed in ${processingTime}ms`)
+                console.log(`✅ ${useNVENC ? 'NVENC GPU' : 'Software'} encoding completed in ${processingSeconds.toFixed(2)}s`)
                 console.log(`📊 Created ${tsFiles.length} segments`)
+                
+                // Calculate encoding speed
+                let speedMultiplier = 'unknown'
+                const speedMatch = logs.match(/speed=\s*([0-9.]+)x/)
+                if (speedMatch) {
+                    speedMultiplier = `${speedMatch[1]}x realtime`
+                }
                 
                 resolve({
                     segmentCount: tsFiles.length,
                     processingTime: processingTime,
-                    speedup: `${(processingTime / 1000).toFixed(1)}s`
+                    speedup: speedMultiplier,
+                    encodingMethod: useNVENC ? 'NVENC GPU' : 'Software x264'
                 })
             } else {
-                console.error(`❌ NVENC encoding failed with code ${code}`)
-                console.error('FFmpeg logs:', logs)
-                reject(new Error(`FFmpeg process exited with code ${code}`))
+                console.error(`❌ ${useNVENC ? 'NVENC' : 'Software'} encoding failed with code ${code}`)
+                console.error('FFmpeg error logs:')
+                console.error(logs.slice(-1000)) // Last 1000 chars of logs
+                reject(new Error(`FFmpeg process exited with code ${code}. Check logs above.`))
             }
         })
         
         proc.on('error', (err) => {
-            console.error('❌ NVENC process error:', err)
+            console.error('❌ FFmpeg process error:', err)
             reject(err)
         })
+    })
+}
+
+// Check NVENC availability
+const checkNVENCAvailability = async () => {
+    return new Promise((resolve) => {
+        console.log('🔍 Checking NVENC availability...')
+        
+        // Check if nvidia-smi works first
+        const nvidiaCheck = spawn('nvidia-smi', ['-L'])
+        let hasNvidiaGPU = false
+        
+        nvidiaCheck.stdout.on('data', (data) => {
+            const output = data.toString()
+            if (output.includes('GPU') && output.includes('GeForce')) {
+                hasNvidiaGPU = true
+                console.log('✅ NVIDIA GPU detected:', output.trim())
+            }
+        })
+        
+        nvidiaCheck.on('close', (code) => {
+            if (!hasNvidiaGPU || code !== 0) {
+                console.log('❌ No NVIDIA GPU detected, using software encoding')
+                resolve(false)
+                return
+            }
+            
+            // Test NVENC encoding capability
+            const testArgs = [
+                '-f', 'lavfi',
+                '-i', 'testsrc=duration=1:size=320x240:rate=1',
+                '-c:v', 'h264_nvenc',
+                '-t', '1',
+                '-f', 'null',
+                '-'
+            ]
+            
+            console.log('🧪 Testing NVENC: ffmpeg', testArgs.join(' '))
+            const testProc = spawn('ffmpeg', testArgs)
+            let testError = false
+            
+            testProc.stderr.on('data', (data) => {
+                const output = data.toString()
+                if (output.includes('nvenc') && (output.includes('error') || output.includes('failed') || output.includes('not found'))) {
+                    testError = true
+                    console.log('❌ NVENC test failed:', output.trim())
+                }
+            })
+            
+            testProc.on('close', (testCode) => {
+                if (testCode === 0 && !testError) {
+                    console.log('✅ NVENC is available and working!')
+                    resolve(true)
+                } else {
+                    console.log('❌ NVENC test failed, using software encoding')
+                    console.log('💡 This may be due to:')
+                    console.log('   - FFmpeg not compiled with NVENC support')
+                    console.log('   - Missing NVIDIA drivers')
+                    console.log('   - GPU not supporting NVENC')
+                    resolve(false)
+                }
+            })
+            
+            // Timeout test after 10 seconds
+            setTimeout(() => {
+                testProc.kill()
+                console.log('⏰ NVENC test timeout, using software encoding')
+                resolve(false)
+            }, 10000)
+        })
+        
+        // Timeout nvidia-smi check
+        setTimeout(() => {
+            nvidiaCheck.kill()
+            console.log('⏰ NVIDIA check timeout, using software encoding')
+            resolve(false)
+        }, 5000)
     })
 }
 
@@ -584,8 +744,8 @@ const createAndUploadM3U8ToOSS = async (segments, originalM3u8Content, ossConfig
         
         console.log(`📝 Created M3U8 with ${segments.length} segments`)
         
-        // Upload M3U8 to OSS
-        const m3u8Path = `${md5DriveId}.m3u8`
+        // Upload M3U8 to OSS - INSIDE the same folder as segments for easier deletion
+        const m3u8Path = `${md5DriveId}/master.m3u8`  // Put M3U8 inside folder, not outside
         const uploadResult = await client.put(m3u8Path, Buffer.from(playlistContent), {
             headers: {
                 'Content-Type': 'application/vnd.apple.mpegurl',
