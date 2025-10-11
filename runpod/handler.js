@@ -364,21 +364,31 @@ const downloadVideoFromGoogleDrive = async (driveId, token, outputPath) => {
         console.log(`- expires_at: ${token.expires_at || 'missing'}`)
         console.log(`- expiry_date: ${token.expiry_date || 'missing'}`)
         
-        // CRITICAL TIME COMPARISON
+        // CRITICAL TIME COMPARISON - Support both expiry_date (timestamp) and expires_at (ISO string)
         const now = Date.now()
         const serverTime = new Date().toISOString()
-        const tokenExpiryTime = token.expiry_date ? new Date(token.expiry_date).toISOString() : 'N/A'
-        const timeUntilExpiry = token.expiry_date ? token.expiry_date - now : 0
+        
+        // Handle both token formats
+        let expiryTimestamp = null
+        if (token.expiry_date) {
+            expiryTimestamp = token.expiry_date // Already a timestamp
+        } else if (token.expires_at) {
+            expiryTimestamp = new Date(token.expires_at).getTime() // Convert ISO string to timestamp
+        }
+        
+        const tokenExpiryTime = expiryTimestamp ? new Date(expiryTimestamp).toISOString() : 'N/A'
+        const timeUntilExpiry = expiryTimestamp ? expiryTimestamp - now : 0
         const minutesUntilExpiry = Math.round(timeUntilExpiry / 1000 / 60)
         
         console.log(`🕐 RUNPOD SERVER TIME ANALYSIS:`)
         console.log(`- RunPod server timestamp: ${now}`)
         console.log(`- RunPod server time: ${serverTime}`)
-        console.log(`- Token expiry timestamp: ${token.expiry_date || 'missing'}`)
+        console.log(`- Token expiry timestamp: ${expiryTimestamp || 'missing'}`)
         console.log(`- Token expiry time: ${tokenExpiryTime}`)
         console.log(`- Time until expiry (ms): ${timeUntilExpiry}`)
         console.log(`- Time until expiry (minutes): ${minutesUntilExpiry}`)
-        console.log(`- Token valid on RunPod server: ${token.expiry_date ? token.expiry_date > now : 'unknown'}`)
+        console.log(`- Token valid on RunPod server: ${expiryTimestamp ? expiryTimestamp > now : 'unknown'}`)
+        console.log(`- Format detected: ${token.expiry_date ? 'expiry_date (timestamp)' : token.expires_at ? 'expires_at (ISO string)' : 'unknown'}`)
         
         // Test the actual token against Google API immediately
         console.log(`🧪 TESTING TOKEN AGAINST GOOGLE API FROM RUNPOD...`)
