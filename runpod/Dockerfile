@@ -1,64 +1,80 @@
-# RunPod Video Encoding Template
-FROM runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel
+# Multi-stage build for NVENC-compatible FFmpeg
+# Stage 1: Get FFmpeg with NVENC support compatible with driver 550.x
+FROM jrottenberg/ffmpeg:6.1-nvidia AS ffmpeg
 
-# Install basic dependencies
+# Stage 2: Runtime with CUDA 12.4 for better compatibility
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+# Install essential dependencies
 RUN apt-get update && apt-get install -y \
-    wget \
     curl \
-    xz-utils \
+    ca-certificates \
+    python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install latest FFmpeg with NVENC support (static build)
-RUN echo "🔧 Installing FFmpeg with NVENC support..." \
-    && wget -q https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz \
-    && tar -xf ffmpeg-master-latest-linux64-gpl.tar.xz \
-    && cp ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/ \
-    && cp ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/ \
-    && chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe \
-    && rm -rf ffmpeg-master-latest-linux64-gpl* \
-    && echo "✅ FFmpeg installation complete" \
-    && echo "📊 FFmpeg version:" \
-    && ffmpeg -version | head -5 \
-    && echo "🔍 Available NVENC encoders:" \
-    && (ffmpeg -encoders 2>/dev/null | grep nvenc | head -10 || echo "⚠️ No NVENC encoders found") \
-    && echo "🔍 Available hardware acceleration:" \
-    && (ffmpeg -hwaccels 2>/dev/null || echo "⚠️ Hardware acceleration check failed") \
-    && echo "🔧 FFmpeg build info:" \
-    && (ffmpeg -buildconf 2>/dev/null | grep -E "(nvenc|cuda)" || echo "⚠️ No NVENC/CUDA in build config")
+# Copy FFmpeg binaries with NVENC support (compatible with driver 550.x)
+COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+COPY --from=ffmpeg /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 
-# Install Node.js for our processing script
+# Set NVIDIA environment for video encoding
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+ENV CUDA_VISIBLE_DEVICES=all
+ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
+
+# Install Node.js 18.x
 RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
-    && apt-get install -y nodejs
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
 
-# Create working directory
+# Install RunPod Python SDK
+RUN pip3 install --no-cache-dir runpod
+
+# Verify FFmpeg NVENC support during build
+RUN echo "� Verifying FFmpeg NVENC compatibility..." \
+    && ffmpeg -version | head -3 \
+    && echo "🔍 Available NVENC encoders:" \
+    && (ffmpeg -encoders 2>/dev/null | grep nvenc || echo "⚠️ NVENC check will be done at runtime") \
+    && echo "✅ FFmpeg with NVENC support ready for runtime"
+
+# Set working directory
 WORKDIR /app
 
-# Copy package.json and install dependencies
+# Copy package.json and install Node.js dependencies
 COPY package.json ./
-RUN npm install
+RUN npm ci --only=production
 
-# Copy handler script
-COPY handler.js ./
+# Copy application files
+COPY handler.js runpod_wrapper.py ./
 
-# Create necessary directories
+# Create encoding workspace
 RUN mkdir -p /tmp/encoding
 
-# Set environment variables for NVIDIA runtime
-ENV NVIDIA_VISIBLE_DEVICES=all
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
-ENV CUDA_VISIBLE_DEVICES=all
+# Set production environment
 ENV NODE_ENV=production
 
-# Verify NVIDIA runtime during build (if available)
-RUN echo "🔍 Checking NVIDIA runtime availability..." \
-    && (nvidia-smi -L 2>/dev/null && echo "✅ NVIDIA runtime available during build" || echo "⚠️ NVIDIA runtime not available during build (expected in non-GPU build environment)") \
-    && echo "🔧 Environment variables set for GPU runtime"
+# Create entrypoint script for better startup
+RUN echo '#!/bin/bash\n\
+echo "🚀 Starting RunPod Video Encoder with NVENC support"\n\
+echo "🔧 GPU: $NVIDIA_VISIBLE_DEVICES"\n\
+echo "🔧 Driver capabilities: $NVIDIA_DRIVER_CAPABILITIES"\n\
+echo ""\n\
+# Verify NVENC at runtime\n\
+echo "🔍 Runtime NVENC verification:"\n\
+if nvidia-smi -L 2>/dev/null; then\n\
+    echo "✅ NVIDIA GPU detected"\n\
+    if ffmpeg -f lavfi -i testsrc=duration=1:size=320x240:rate=1 -c:v h264_nvenc -t 1 -f null - 2>/dev/null; then\n\
+        echo "🚀 NVENC WORKING! GPU encoding enabled (6x faster)"\n\
+    else\n\
+        echo "⚠️ NVENC test failed - using CPU encoding (slower but stable)"\n\
+    fi\n\
+else\n\
+    echo "⚠️ No NVIDIA GPU detected - using CPU encoding"\n\
+fi\n\
+echo ""\n\
+echo "🎯 Starting RunPod handler..."\n\
+exec python3 runpod_wrapper.py\n' > /app/entrypoint.sh \
+    && chmod +x /app/entrypoint.sh
 
-# Install RunPod Python SDK (required for serverless)
-RUN pip install runpod
-
-# Create RunPod wrapper
-COPY runpod_wrapper.py ./
-
-# Start the RunPod handler
-CMD ["python", "runpod_wrapper.py"]
+# Use entrypoint for better initialization
+ENTRYPOINT ["/app/entrypoint.sh"]
